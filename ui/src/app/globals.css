@@ -1,0 +1,304 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* FIXED: use real characters (not HTML entities) */
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-body);
+  --font-mono: var(--font-body);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+  --radius: var(--radius-base);
+}
+
+:root {
+  --radius-base: 1rem;
+  --font-body: "IBM Plex Sans", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Fraunces", "Georgia", "Times New Roman", serif;
+
+  --background: oklch(0.14 0.03 257.77);
+  --foreground: oklch(0.96 0.01 240);
+  --card: oklch(0.19 0.02 257.77);
+  --card-foreground: oklch(0.96 0.01 240);
+  --popover: oklch(0.19 0.02 257.77);
+  --popover-foreground: oklch(0.96 0.01 240);
+  --primary: oklch(0.88 0.1 90);
+  --primary-foreground: oklch(0.15 0.02 257.77);
+  --secondary: oklch(0.22 0.03 257.77);
+  --secondary-foreground: oklch(0.96 0.01 240);
+  --muted: oklch(0.22 0.03 257.77);
+  --muted-foreground: oklch(0.73 0.03 257.77);
+  --accent: oklch(0.2 0.04 257.77);
+  --accent-foreground: oklch(0.96 0.01 240);
+  --destructive: oklch(0.62 0.2 28);
+  --border: oklch(1 0 0 / 12%);
+  --input: oklch(1 0 0 / 16%);
+  --ring: oklch(0.6 0.04 257.77);
+
+  --chart-1: oklch(0.68 0.18 60);
+  --chart-2: oklch(0.62 0.14 170);
+  --chart-3: oklch(0.52 0.12 240);
+  --chart-4: oklch(0.78 0.12 95);
+  --chart-5: oklch(0.72 0.14 40);
+
+  --sidebar: oklch(0.18 0.02 257.77);
+  --sidebar-foreground: oklch(0.96 0.01 240);
+  --sidebar-primary: oklch(0.32 0.04 257.77);
+  --sidebar-primary-foreground: oklch(0.96 0.01 240);
+  --sidebar-accent: oklch(0.24 0.04 257.77);
+  --sidebar-accent-foreground: oklch(0.96 0.01 240);
+  --sidebar-border: oklch(1 0 0 / 12%);
+  --sidebar-ring: oklch(0.6 0.04 257.77);
+
+  /* =========================================================
+     Global Scrollbar Theme Tokens (used everywhere)
+     ========================================================= */
+  /* Helps browser render default UI (scrollbars/form controls) as dark */
+  color-scheme: dark; /* [4](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/color-scheme) */
+
+  --sb-size: 8px;
+  --sb-track: transparent;
+  --sb-thumb: rgba(255, 255, 255, 0.18);
+  --sb-thumb-hover: rgba(255, 255, 255, 0.28);
+  --sb-radius: 999px;
+}
+
+.dark {
+  --background: var(--background);
+  --foreground: var(--foreground);
+  --card: var(--card);
+  --card-foreground: var(--card-foreground);
+  --popover: var(--popover);
+  --popover-foreground: var(--popover-foreground);
+  --primary: var(--primary);
+  --primary-foreground: var(--primary-foreground);
+  --secondary: var(--secondary);
+  --secondary-foreground: var(--secondary-foreground);
+  --muted: var(--muted);
+  --muted-foreground: var(--muted-foreground);
+  --accent: var(--accent);
+  --accent-foreground: var(--accent-foreground);
+  --destructive: var(--destructive);
+  --border: var(--border);
+  --input: var(--input);
+  --ring: var(--ring);
+  --chart-1: var(--chart-1);
+  --chart-2: var(--chart-2);
+  --chart-3: var(--chart-3);
+  --chart-4: var(--chart-4);
+  --chart-5: var(--chart-5);
+  --sidebar: var(--sidebar);
+  --sidebar-foreground: var(--sidebar-foreground);
+  --sidebar-primary: var(--sidebar-primary);
+  --sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --sidebar-accent: var(--sidebar-accent);
+  --sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --sidebar-border: var(--sidebar-border);
+  --sidebar-ring: var(--sidebar-ring);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-body);
+  }
+}
+
+@layer utilities {
+  .font-display {
+    font-family: var(--font-display);
+  }
+
+  .bg-grid {
+    background-image:
+      linear-gradient(transparent 23px, rgba(15, 23, 42, 0.06) 24px),
+      linear-gradient(90deg, transparent 23px, rgba(15, 23, 42, 0.06) 24px);
+    background-size: 24px 24px;
+  }
+
+  .bg-noise {
+    position: relative;
+  }
+
+  .bg-noise::after {
+    content: "";
+    pointer-events: none;
+    position: absolute;
+    inset: 0;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140' viewBox='0 0 140 140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/></filter><rect width='140' height='140' filter='url(%23n)' opacity='0.08'/></svg>");
+    mix-blend-mode: multiply;
+  }
+}
+
+/* ── Sidebar layout fix ─────────────────────────────────── */
+@layer utilities {
+  .sidebar-offset [data-slot="sidebar-wrapper"] {
+    min-height: 0 !important;
+  }
+  .sidebar-offset [data-slot="sidebar-gap"] {
+    display: none !important;
+  }
+  .sidebar-offset [data-slot="sidebar"] {
+    height: 100% !important;
+    min-height: 0 !important;
+  }
+  .sidebar-offset [data-slot="sidebar-container"] {
+    position: relative !important;
+    top: unset !important;
+    left: unset !important;
+    right: unset !important;
+    bottom: unset !important;
+    height: 100% !important;
+    max-height: 100% !important;
+    z-index: 10;
+    border: none !important;
+  }
+  .sidebar-offset [data-slot="sidebar-inner"] {
+    border-radius: 0;
+    border: none !important;
+    border-right: 1px solid rgba(255, 255, 255, 0.08) !important;
+    background: #141414 !important;
+    overflow: hidden;
+  }
+}
+
+/* =========================================================
+   Global dark scrollbar - applies everywhere (no class needed)
+   ========================================================= */
+/* WebKit family affects scrollbars on any element with scrollable overflow [1](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Selectors/::-webkit-scrollbar) */
+@supports selector(::-webkit-scrollbar) {
+  *::-webkit-scrollbar {
+    width: var(--sb-size);
+    height: var(--sb-size);
+  }
+
+  *::-webkit-scrollbar-track {
+    background: var(--sb-track);
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: var(--sb-thumb);
+    border-radius: var(--sb-radius);
+    border: 2px solid var(--sb-track);
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: var(--sb-thumb-hover);
+  }
+}
+
+/* Firefox standard properties for scrollbar styling [2](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/scrollbar-color)[3](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/scrollbar-width) */
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin; /* [3](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/scrollbar-width) */
+    scrollbar-color: var(--sb-thumb) var(--sb-track); /* [2](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/scrollbar-color) */
+  }
+}
+
+/* ── Thinking shimmer animation ─────────────────────────── */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@layer utilities {
+  .shimmer-text {
+    background: linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.45) 0%,
+      rgba(255, 255, 255, 0.8) 40%,
+      rgba(255, 255, 255, 0.45) 80%
+    );
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: shimmer 2.4s ease-in-out infinite;
+  }
+
+  .thinking-pulse {
+    animation: thinking-dot 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes thinking-dot {
+  0%, 80%, 100% { opacity: 0.3; }
+  40% { opacity: 1; }
+}
+
+@keyframes ethan-core-glow {
+  0% {
+    box-shadow:
+      0 0 40px rgba(0, 242, 254, 0.6),
+      0 0 80px rgba(0, 242, 254, 0.3),
+      inset 0 0 30px rgba(0, 242, 254, 0.2);
+  }
+  100% {
+    box-shadow:
+      0 0 60px rgba(0, 242, 254, 1),
+      0 0 120px rgba(0, 242, 254, 0.5),
+      inset 0 0 50px rgba(0, 242, 254, 0.4);
+  }
+}
+
+@keyframes ethan-core-pulse {
+  0% { transform: scale(1); opacity: 0.8; }
+  50% { transform: scale(1.1); opacity: 0.4; }
+  100% { transform: scale(1); opacity: 0.8; }
+}
+
+@keyframes ethan-neural-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes ethan-module-rotate {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes ethan-outer-rotate {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}

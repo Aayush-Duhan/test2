@@ -1,0 +1,14 @@
+.venv/
+outputs/
+node_modules/
+.next/
+dist/
+build/
+coverage/
+*.log
+__pycache__/
+*.py[cod]
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
