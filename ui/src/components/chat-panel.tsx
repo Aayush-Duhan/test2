@@ -299,68 +299,120 @@ function MessageList({
         <span className="text-[11px] text-white/55">{messages.length} events</span>
       </div>
 
-      <PipelineProgressFeed tasks={tasks} runStatus={status} />
+      {messages.length === 0 ? (
+        <p className="text-sm text-white/50">Flow updates will appear here once the migration starts.</p>
+      ) : (
+        <NodeLogTimeline messages={messages} tasks={tasks} runStatus={status} />
+      )}
 
-      <div className="space-y-3">
-        {messages.length === 0 ? (
-          <p className="text-sm text-white/50">Flow updates will appear here once the migration starts.</p>
-        ) : (
-          messages.map((m) => <ChatBubble key={m.id} message={m} />)
-        )}
+      {isAgentThinking && (
+        <div className="mt-3 flex justify-start">
+          <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/70">Agent is working...</div>
+        </div>
+      )}
 
-        {isAgentThinking && (
-          <div className="flex justify-start">
-            <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/70">Agent is working...</div>
+      {error && (
+        <div className="mt-3 flex justify-start">
+          <div className="max-w-[90%] whitespace-pre-wrap rounded-2xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm leading-relaxed text-red-100">
+            {sanitizeMessageContent(error)}
           </div>
-        )}
-
-        {error && (
-          <div className="flex justify-start">
-            <div className="max-w-[90%] whitespace-pre-wrap rounded-2xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm leading-relaxed text-red-100">
-              {sanitizeMessageContent(error)}
-            </div>
-          </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function PipelineProgressFeed({ tasks, runStatus }: { tasks: Task[]; runStatus: string }) {
-  const workflow = tasks[0];
-  const steps = workflow?.subtasks ?? [];
+function NodeLogTimeline({
+  messages,
+  tasks,
+  runStatus,
+}: {
+  messages: ChatMessage[];
+  tasks: Task[];
+  runStatus: string;
+}) {
+  const stepStatusByTitle = React.useMemo(() => {
+    const workflow = tasks[0];
+    const subtasks = workflow?.subtasks ?? [];
+    return new Map(subtasks.map((step) => [step.title.toLowerCase(), step.status]));
+  }, [tasks]);
 
-  if (steps.length === 0) return null;
+  const grouped = React.useMemo(() => {
+    type NodeGroup = { id: string; title: string; logs: ChatMessage[] };
+    const prelude: ChatMessage[] = [];
+    const nodes: NodeGroup[] = [];
+    let current: NodeGroup | null = null;
+
+    for (const message of messages) {
+      const text = sanitizeMessageContent(message.content);
+      const started = parseStepMarker(text, "Starting");
+      if (started) {
+        current = { id: message.id, title: started, logs: [] };
+        nodes.push(current);
+        continue;
+      }
+
+      const completed = parseStepMarker(text, "Completed");
+      if (completed) {
+        continue;
+      }
+
+      if (current) {
+        current.logs.push(message);
+      } else {
+        prelude.push(message);
+      }
+    }
+
+    return { prelude, nodes };
+  }, [messages]);
 
   return (
-    <div className="mb-4 space-y-2 rounded-2xl border border-white/10 bg-black/20 p-3">
-      {steps.map((step) => {
-        const isDone = step.status === "completed";
-        const isActive = step.status === "in-progress";
-        const isPending = step.status === "pending";
+    <div className="space-y-3">
+      {grouped.prelude.map((message) => (
+        <ChatBubble key={message.id} message={message} />
+      ))}
 
+      {grouped.nodes.map((node) => {
+        const status = stepStatusByTitle.get(node.title.toLowerCase());
+        const isDone = status === "completed";
+        const isActive = status === "in-progress";
         const rowClass = isDone
           ? "border-emerald-400/30 bg-emerald-500/10"
-          : isActive || (isPending && ["running", "queued"].includes(runStatus))
+          : isActive || runStatus === "running" || runStatus === "queued"
             ? "border-amber-400/40 bg-amber-500/10"
             : "border-white/10 bg-white/5";
 
-        const label = isDone ? "Complete" : isActive ? "In Progress" : isPending ? "Pending" : step.status;
+        const label = isDone ? "Complete" : isActive ? "In Progress" : "Started";
 
         return (
-          <div key={step.id} className={`rounded-xl border px-3 py-2 ${rowClass}`}>
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-sm font-medium text-white/90">{step.title}</p>
-              <span className="rounded-full border border-white/20 bg-white/10 px-2 py-0.5 text-[11px] text-white/80">
-                {label}
-              </span>
+          <div key={node.id} className="space-y-2">
+            <div className={`rounded-xl border px-3 py-2 ${rowClass}`}>
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-medium text-white/90">{node.title}</p>
+                <span className="rounded-full border border-white/20 bg-white/10 px-2 py-0.5 text-[11px] text-white/80">
+                  {label}
+                </span>
+              </div>
             </div>
-            {step.description && <p className="mt-1 text-xs text-white/55">{step.description}</p>}
+
+            {node.logs.length > 0 && (
+              <div className="ml-4 space-y-2 border-l border-white/10 pl-3">
+                {node.logs.map((message) => (
+                  <ChatBubble key={message.id} message={message} />
+                ))}
+              </div>
+            )}
           </div>
         );
       })}
     </div>
   );
+}
+
+function parseStepMarker(text: string, marker: "Starting" | "Completed"): string | null {
+  const match = text.match(new RegExp(`^${marker}:\\s*(.+?)\\.?$`, "i"));
+  return match?.[1]?.trim() || null;
 }
 
 function ChatBubble({ message: m }: { message: ChatMessage }) {
