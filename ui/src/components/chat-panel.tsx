@@ -57,6 +57,16 @@ export function ChatPanel({
 }: ChatPanelProps) {
   const isSessionFinished = runId !== null && ["failed", "canceled"].includes(status);
   const isAgentPhase = status === "completed";
+  const hasActiveRun = runId !== null;
+  const isChatInputEnabled = hasActiveRun && isAgentPhase && !isSessionFinished && !!onSendAgentMessage;
+
+  const chatInputHint = !hasActiveRun
+    ? null
+    : isSessionFinished
+      ? "This session has ended. Retry or start a new session to continue chatting with the agent."
+      : !isAgentPhase
+        ? "Agent chat unlocks automatically after CLI conversion completes."
+        : "Press Enter to send. Use Shift + Enter for a new line.";
 
   React.useEffect(() => {
     if (uploadedFiles.length > 0) {
@@ -158,27 +168,6 @@ export function ChatPanel({
                 />
               )}
 
-              {isSessionFinished && (
-                <div className="flex shrink-0 items-center justify-between rounded-2xl border border-white/15 bg-white/5 px-4 py-3">
-                  <p className="text-sm text-white/80">This session is finished. Retry it or start a new session.</p>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={onRetryRun}
-                      disabled={isBusy}
-                      className="rounded-full bg-white px-4 py-2 text-xs font-medium text-black hover:bg-white/90 disabled:opacity-50"
-                    >
-                      Retry Session
-                    </button>
-                    <button
-                      onClick={onResetSession}
-                      className="rounded-full border border-white/20 px-4 py-2 text-xs text-white/80 hover:bg-white/10"
-                    >
-                      Start New Session
-                    </button>
-                  </div>
-                </div>
-              )}
-
               {runId && isAgentPhase && (
                 <div className="shrink-0 rounded-2xl border border-emerald-400/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
                   Conversion completed. You can now chat with the agent to review, fix, or explain the output.
@@ -204,13 +193,38 @@ export function ChatPanel({
           )}
         </div>
 
-        {runId && isAgentPhase && (
+        {hasActiveRun && (
           <div className="shrink-0 border-t border-white/10 px-4 py-3">
             <PromptBox
-              placeholder="Ask the agent to review or fix converted code..."
+              placeholder={
+                isChatInputEnabled
+                  ? "Ask the agent to review or fix converted code..."
+                  : "Chat will be available after conversion completes..."
+              }
               onSend={onSendAgentMessage}
-              isSending={isBusy}
+              disabled={!isChatInputEnabled}
+              isSending={isChatInputEnabled && isBusy}
             />
+
+            {chatInputHint && <p className="mt-2 px-1 text-xs text-white/60">{chatInputHint}</p>}
+
+            {isSessionFinished && (
+              <div className="mt-2 flex gap-2 px-1">
+                <button
+                  onClick={onRetryRun}
+                  disabled={isBusy}
+                  className="rounded-full bg-white px-3 py-1.5 text-xs font-medium text-black hover:bg-white/90 disabled:opacity-50"
+                >
+                  Retry Session
+                </button>
+                <button
+                  onClick={onResetSession}
+                  className="rounded-full border border-white/20 px-3 py-1.5 text-xs text-white/80 hover:bg-white/10"
+                >
+                  Start New Session
+                </button>
+              </div>
+            )}
           </div>
         )}
       </SidebarInset>
