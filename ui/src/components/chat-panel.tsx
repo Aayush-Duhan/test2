@@ -3,7 +3,6 @@
 import * as React from "react";
 import { ChevronRight } from "lucide-react";
 import { PromptBox } from "@/components/ui/chatgpt-prompt-input";
-import AgentPlan from "@/components/ui/agent-plan";
 import type { Task } from "@/components/ui/agent-plan";
 import { SidebarInset } from "@/components/ui/sidebar";
 import { sanitizeMessageContent } from "@/lib/chat-helpers";
@@ -152,10 +151,6 @@ export function ChatPanel({
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden p-4">
           {runId ? (
             <>
-              <div className="shrink-0">
-                <AgentPlan tasks={tasks} readOnly />
-              </div>
-
               {requiresDdlUpload && (
                 <DdlUploadBanner
                   isBusy={isBusy}
@@ -179,7 +174,13 @@ export function ChatPanel({
                 </div>
               )}
 
-              <MessageList messages={messages} error={error} isAgentThinking={isAgentThinking} />
+              <MessageList
+                tasks={tasks}
+                messages={messages}
+                error={error}
+                status={status}
+                isAgentThinking={isAgentThinking}
+              />
             </>
           ) : isHydratingRun ? (
             <div className="flex flex-1 items-center justify-center">
@@ -268,12 +269,16 @@ function DdlUploadBanner({
 }
 
 function MessageList({
+  tasks,
   messages,
   error,
+  status,
   isAgentThinking = false,
 }: {
+  tasks: Task[];
   messages: ChatMessage[];
   error: string | null;
+  status: string;
   isAgentThinking?: boolean;
 }) {
   const scrollRef = React.useRef<HTMLDivElement>(null);
@@ -293,6 +298,8 @@ function MessageList({
         <h3 className="text-sm font-semibold text-white/90">Project Flow Chat</h3>
         <span className="text-[11px] text-white/55">{messages.length} events</span>
       </div>
+
+      <PipelineProgressFeed tasks={tasks} runStatus={status} />
 
       <div className="space-y-3">
         {messages.length === 0 ? (
@@ -315,6 +322,43 @@ function MessageList({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function PipelineProgressFeed({ tasks, runStatus }: { tasks: Task[]; runStatus: string }) {
+  const workflow = tasks[0];
+  const steps = workflow?.subtasks ?? [];
+
+  if (steps.length === 0) return null;
+
+  return (
+    <div className="mb-4 space-y-2 rounded-2xl border border-white/10 bg-black/20 p-3">
+      {steps.map((step) => {
+        const isDone = step.status === "completed";
+        const isActive = step.status === "in-progress";
+        const isPending = step.status === "pending";
+
+        const rowClass = isDone
+          ? "border-emerald-400/30 bg-emerald-500/10"
+          : isActive || (isPending && ["running", "queued"].includes(runStatus))
+            ? "border-amber-400/40 bg-amber-500/10"
+            : "border-white/10 bg-white/5";
+
+        const label = isDone ? "Complete" : isActive ? "In Progress" : isPending ? "Pending" : step.status;
+
+        return (
+          <div key={step.id} className={`rounded-xl border px-3 py-2 ${rowClass}`}>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-sm font-medium text-white/90">{step.title}</p>
+              <span className="rounded-full border border-white/20 bg-white/10 px-2 py-0.5 text-[11px] text-white/80">
+                {label}
+              </span>
+            </div>
+            {step.description && <p className="mt-1 text-xs text-white/55">{step.description}</p>}
+          </div>
+        );
+      })}
     </div>
   );
 }
