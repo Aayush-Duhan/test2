@@ -51,7 +51,6 @@ export function ChatPanel({
   uploadedFiles = [],
   onCreateProject,
   onRetryRun,
-  onResetSession,
   onPickDdlFile,
   onSendAgentMessage,
 }: ChatPanelProps) {
@@ -208,23 +207,6 @@ export function ChatPanel({
 
             {chatInputHint && <p className="mt-2 px-1 text-xs text-white/60">{chatInputHint}</p>}
 
-            {isSessionFinished && (
-              <div className="mt-2 flex gap-2 px-1">
-                <button
-                  onClick={onRetryRun}
-                  disabled={isBusy}
-                  className="rounded-full bg-white px-3 py-1.5 text-xs font-medium text-black hover:bg-white/90 disabled:opacity-50"
-                >
-                  Retry Session
-                </button>
-                <button
-                  onClick={onResetSession}
-                  className="rounded-full border border-white/20 px-3 py-1.5 text-xs text-white/80 hover:bg-white/10"
-                >
-                  Start New Session
-                </button>
-              </div>
-            )}
           </div>
         )}
       </SidebarInset>
