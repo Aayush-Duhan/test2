@@ -168,12 +168,6 @@ export function ChatPanel({
                 </div>
               )}
 
-              {runId && !isAgentPhase && !isSessionFinished && (
-                <div className="shrink-0 rounded-2xl border border-blue-400/30 bg-blue-500/10 px-4 py-3 text-sm text-blue-100">
-                  Conversion pipeline is running. Agent chat will be enabled after CLI conversion completes.
-                </div>
-              )}
-
               <MessageList
                 tasks={tasks}
                 messages={messages}
@@ -338,22 +332,42 @@ function NodeLogTimeline({
   }, [tasks]);
 
   const grouped = React.useMemo(() => {
-    type NodeGroup = { id: string; title: string; logs: ChatMessage[] };
+    type NodeGroup = { id: string; title: string; logs: ChatMessage[]; order: number };
+    const workflow = tasks[0];
+    const subtasks = workflow?.subtasks ?? [];
+
     const prelude: ChatMessage[] = [];
     const nodes: NodeGroup[] = [];
+    const nodeByTitle = new Map<string, NodeGroup>();
     let current: NodeGroup | null = null;
+
+    const getOrCreateNode = (title: string, fallbackOrder: number) => {
+      const key = title.toLowerCase();
+      const existing = nodeByTitle.get(key);
+      if (existing) return existing;
+      const stepIndex = subtasks.findIndex((step) => step.title.toLowerCase() === key);
+      const node: NodeGroup = {
+        id: `${key}-${fallbackOrder}`,
+        title,
+        logs: [],
+        order: stepIndex >= 0 ? stepIndex : fallbackOrder,
+      };
+      nodeByTitle.set(key, node);
+      nodes.push(node);
+      return node;
+    };
 
     for (const message of messages) {
       const text = sanitizeMessageContent(message.content);
       const started = parseStepMarker(text, "Starting");
       if (started) {
-        current = { id: message.id, title: started, logs: [] };
-        nodes.push(current);
+        current = getOrCreateNode(started, nodes.length);
         continue;
       }
 
       const completed = parseStepMarker(text, "Completed");
       if (completed) {
+        current = getOrCreateNode(completed, nodes.length);
         continue;
       }
 
@@ -364,8 +378,15 @@ function NodeLogTimeline({
       }
     }
 
+    // Persist node progress across refresh by seeding nodes from task statuses.
+    subtasks.forEach((step, index) => {
+      if (step.status === "pending") return;
+      getOrCreateNode(step.title, index);
+    });
+
+    nodes.sort((a, b) => a.order - b.order);
     return { prelude, nodes };
-  }, [messages]);
+  }, [messages, tasks]);
 
   return (
     <div className="space-y-3">
