@@ -54,14 +54,78 @@ function cleanTerminalOutput(message: string): string {
     .join("\n");
 }
 
-function parseLogTimestamp(raw: string, fallbackTime: number): number {
-  const match = raw.match(/^\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]/);
-  if (!match) return fallbackTime;
+type PersistedRunEvent = {
+  type?: string;
+  timestamp?: string;
+  payload?: Record<string, unknown>;
+};
 
-  const [, hh, mm, ss] = match;
-  const base = new Date(fallbackTime);
-  base.setHours(Number(hh), Number(mm), Number(ss ?? 0), 0);
-  return base.getTime();
+function buildHydratedMessages(events: unknown, statements: ExecuteStatementEvent[], errors: ExecuteErrorEvent[]): ChatMessage[] {
+  if (!Array.isArray(events) || events.length === 0) {
+    return [...buildSqlExecutionMessages(statements, errors)];
+  }
+
+  const timeline: Array<{ order: number; time: number; message: ChatMessage }> = [];
+  const fallbackTime = Date.now();
+
+  events.forEach((raw, index) => {
+    if (!raw || typeof raw !== "object") return;
+    const event = raw as PersistedRunEvent;
+    const type = typeof event.type === "string" ? event.type : "";
+    const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+
+    const parsedTime = typeof event.timestamp === "string" ? Date.parse(event.timestamp) : Number.NaN;
+    const time = Number.isNaN(parsedTime) ? fallbackTime + index : parsedTime;
+
+    if (type === "step:started") {
+      const label = typeof payload.label === "string" ? payload.label : payload.stepId;
+      if (typeof label === "string" && label.length > 0) {
+        timeline.push({ order: index, time, message: makeMessage("system", `Starting: ${label}.`) });
+      }
+      return;
+    }
+
+    if (type === "step:completed") {
+      const label = typeof payload.label === "string" ? payload.label : payload.stepId;
+      if (typeof label === "string" && label.length > 0) {
+        timeline.push({ order: index, time, message: makeMessage("system", `Completed: ${label}.`) });
+      }
+      return;
+    }
+
+    if (type === "log") {
+      const content = typeof payload.message === "string" ? cleanTerminalOutput(stripLogTags(payload.message)) : "";
+      if (content) {
+        timeline.push({ order: index, time, message: makeMessage("agent", content) });
+      }
+      return;
+    }
+
+    if (type === "execute_sql:statement") {
+      timeline.push({
+        order: index,
+        time,
+        message: makeSqlStatementMessage(payload as ExecuteStatementEvent),
+      });
+      return;
+    }
+
+    if (type === "execute_sql:error") {
+      timeline.push({
+        order: index,
+        time,
+        message: makeSqlErrorMessage(payload as ExecuteErrorEvent),
+      });
+      return;
+    }
+
+    if (type === "run:completed") {
+      timeline.push({ order: index, time, message: makeMessage("system", "Migration completed.") });
+    }
+  });
+
+  timeline.sort((a, b) => (a.time === b.time ? a.order - b.order : a.time - b.time));
+  return timeline.map((item) => item.message);
 }
 
 /* ================================================================
@@ -167,53 +231,19 @@ export default function SessionsPage() {
       });
     }
 
-    const runStart = Date.parse(typeof data.createdAt === "string" ? data.createdAt : "") || Date.now();
-    const timeline: Array<{ order: number; time: number; message: ChatMessage }> = [];
-    let order = 0;
+    const hydratedMessages = buildHydratedMessages(data.events, s, e);
 
-    if (Array.isArray(data.logs)) {
-      for (const rawLog of data.logs) {
-        if (typeof rawLog !== "string") continue;
-        const cleaned = cleanTerminalOutput(stripLogTags(rawLog));
-        if (!cleaned) continue;
-        timeline.push({
-          order: order++,
-          time: parseLogTimestamp(rawLog, runStart + order),
-          message: makeMessage("agent", cleaned),
-        });
-      }
+    if (hydratedMessages.length > 0) {
+      setMessages(hydratedMessages);
+    } else {
+      const baseMessages: ChatMessage[] = Array.isArray(data.logs)
+        ? data.logs
+            .map((l: string) => cleanTerminalOutput(stripLogTags(l)))
+            .filter((l: string) => l.length > 0)
+            .map((l: string) => makeMessage("agent", l))
+        : [];
+      setMessages([...baseMessages, ...buildSqlExecutionMessages(s, e)]);
     }
-
-    if (Array.isArray(data.steps)) {
-      for (const step of data.steps) {
-        if (!step || typeof step !== "object") continue;
-        const label = typeof step.label === "string" ? step.label : "";
-        if (!label) continue;
-
-        const startedAt = typeof step.startedAt === "string" ? Date.parse(step.startedAt) : Number.NaN;
-        if (!Number.isNaN(startedAt)) {
-          timeline.push({
-            order: order++,
-            time: startedAt,
-            message: makeMessage("system", `Starting: ${label}.`),
-          });
-        }
-
-        const endedAt = typeof step.endedAt === "string" ? Date.parse(step.endedAt) : Number.NaN;
-        if (!Number.isNaN(endedAt) && step.status === "completed") {
-          timeline.push({
-            order: order++,
-            time: endedAt,
-            message: makeMessage("system", `Completed: ${label}.`),
-          });
-        }
-      }
-    }
-
-    timeline.sort((a, b) => (a.time === b.time ? a.order - b.order : a.time - b.time));
-    const baseMessages = timeline.map((item) => item.message);
-
-    setMessages([...baseMessages, ...buildSqlExecutionMessages(s, e)]);
     if (typeof data.error === "string" && data.error.length) setError(data.error);
     setIsBusy(false);
   }, []);

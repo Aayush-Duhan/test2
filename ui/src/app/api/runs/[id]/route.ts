@@ -32,6 +32,7 @@ interface PythonRunDetail {
   resumeFromStage?: string;
   lastExecutedFileIndex?: number;
   selfHealIteration?: number;
+  events?: unknown[];
 }
 
 export async function GET(_: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -70,9 +71,9 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
         resumeFromStage: run.resumeFromStage ?? "",
         lastExecutedFileIndex: run.lastExecutedFileIndex ?? -1,
         selfHealIteration: run.selfHealIteration ?? 0,
+        events: run.events ?? [],
       }),
       "Run lookup failed"
     );
   }, "Run lookup failed");
 }
-
