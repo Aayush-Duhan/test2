@@ -3,7 +3,6 @@
 import * as React from "react";
 import { ChevronRight } from "lucide-react";
 import { PromptBox } from "@/components/ui/chatgpt-prompt-input";
-import AgentPlan from "@/components/ui/agent-plan";
 import type { Task } from "@/components/ui/agent-plan";
 import { SidebarInset } from "@/components/ui/sidebar";
 import { sanitizeMessageContent } from "@/lib/chat-helpers";
@@ -51,12 +50,21 @@ export function ChatPanel({
   uploadedFiles = [],
   onCreateProject,
   onRetryRun,
-  onResetSession,
   onPickDdlFile,
   onSendAgentMessage,
 }: ChatPanelProps) {
   const isSessionFinished = runId !== null && ["failed", "canceled"].includes(status);
   const isAgentPhase = status === "completed";
+  const hasActiveRun = runId !== null;
+  const isChatInputEnabled = hasActiveRun && isAgentPhase && !isSessionFinished && !!onSendAgentMessage;
+
+  const chatInputHint = !hasActiveRun
+    ? null
+    : isSessionFinished
+      ? "This session has ended. Retry or start a new session to continue chatting with the agent."
+      : !isAgentPhase
+        ? "Agent chat unlocks automatically after CLI conversion completes."
+        : "Press Enter to send. Use Shift + Enter for a new line.";
 
   React.useEffect(() => {
     if (uploadedFiles.length > 0) {
@@ -143,10 +151,6 @@ export function ChatPanel({
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden p-4">
           {runId ? (
             <>
-              <div className="shrink-0">
-                <AgentPlan tasks={tasks} readOnly />
-              </div>
-
               {requiresDdlUpload && (
                 <DdlUploadBanner
                   isBusy={isBusy}
@@ -158,40 +162,19 @@ export function ChatPanel({
                 />
               )}
 
-              {isSessionFinished && (
-                <div className="flex shrink-0 items-center justify-between rounded-2xl border border-white/15 bg-white/5 px-4 py-3">
-                  <p className="text-sm text-white/80">This session is finished. Retry it or start a new session.</p>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={onRetryRun}
-                      disabled={isBusy}
-                      className="rounded-full bg-white px-4 py-2 text-xs font-medium text-black hover:bg-white/90 disabled:opacity-50"
-                    >
-                      Retry Session
-                    </button>
-                    <button
-                      onClick={onResetSession}
-                      className="rounded-full border border-white/20 px-4 py-2 text-xs text-white/80 hover:bg-white/10"
-                    >
-                      Start New Session
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {runId && isAgentPhase && (
-                <div className="shrink-0 rounded-2xl border border-emerald-400/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
-                  Conversion completed. You can now chat with the agent to review, fix, or explain the output.
-                </div>
-              )}
-
               {runId && !isAgentPhase && !isSessionFinished && (
                 <div className="shrink-0 rounded-2xl border border-blue-400/30 bg-blue-500/10 px-4 py-3 text-sm text-blue-100">
                   Conversion pipeline is running. Agent chat will be enabled after CLI conversion completes.
                 </div>
               )}
 
-              <MessageList messages={messages} error={error} isAgentThinking={isAgentThinking} />
+              <MessageList
+                tasks={tasks}
+                messages={messages}
+                error={error}
+                status={status}
+                isAgentThinking={isAgentThinking}
+              />
             </>
           ) : isHydratingRun ? (
             <div className="flex flex-1 items-center justify-center">
@@ -204,13 +187,21 @@ export function ChatPanel({
           )}
         </div>
 
-        {runId && isAgentPhase && (
+        {hasActiveRun && (
           <div className="shrink-0 border-t border-white/10 px-4 py-3">
             <PromptBox
-              placeholder="Ask the agent to review or fix converted code..."
+              placeholder={
+                isChatInputEnabled
+                  ? "Ask the agent to review or fix converted code..."
+                  : "Chat will be available after conversion completes..."
+              }
               onSend={onSendAgentMessage}
-              isSending={isBusy}
+              disabled={!isChatInputEnabled}
+              isSending={isChatInputEnabled && isBusy}
             />
+
+            {chatInputHint && <p className="mt-2 px-1 text-xs text-white/60">{chatInputHint}</p>}
+
           </div>
         )}
       </SidebarInset>
@@ -272,12 +263,16 @@ function DdlUploadBanner({
 }
 
 function MessageList({
+  tasks,
   messages,
   error,
+  status,
   isAgentThinking = false,
 }: {
+  tasks: Task[];
   messages: ChatMessage[];
   error: string | null;
+  status: string;
   isAgentThinking?: boolean;
 }) {
   const scrollRef = React.useRef<HTMLDivElement>(null);
@@ -292,35 +287,125 @@ function MessageList({
   }, [messages, isAgentThinking]);
 
   return (
-    <div ref={scrollRef} className="scrollbar-dark flex min-h-0 flex-1 flex-col overflow-y-auto rounded-2xl border border-white/10 bg-[#121212] p-4">
-      <div className="mb-4 flex items-center justify-between border-b border-white/10 pb-3">
-        <h3 className="text-sm font-semibold text-white/90">Project Flow Chat</h3>
-        <span className="text-[11px] text-white/55">{messages.length} events</span>
-      </div>
+    <div ref={scrollRef} className="scrollbar-dark flex min-h-0 flex-1 flex-col overflow-y-auto px-1 py-2">
+      {messages.length === 0 ? (
+        <p className="text-sm text-white/50">Flow updates will appear here once the migration starts.</p>
+      ) : (
+        <NodeLogTimeline messages={messages} tasks={tasks} runStatus={status} />
+      )}
 
-      <div className="space-y-3">
-        {messages.length === 0 ? (
-          <p className="text-sm text-white/50">Flow updates will appear here once the migration starts.</p>
-        ) : (
-          messages.map((m) => <ChatBubble key={m.id} message={m} />)
-        )}
+      {isAgentThinking && (
+        <div className="mt-3 flex justify-start">
+          <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/70">Agent is working...</div>
+        </div>
+      )}
 
-        {isAgentThinking && (
-          <div className="flex justify-start">
-            <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/70">Agent is working...</div>
+      {error && (
+        <div className="mt-3 flex justify-start">
+          <div className="max-w-[90%] whitespace-pre-wrap rounded-2xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm leading-relaxed text-red-100">
+            {sanitizeMessageContent(error)}
           </div>
-        )}
-
-        {error && (
-          <div className="flex justify-start">
-            <div className="max-w-[90%] whitespace-pre-wrap rounded-2xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm leading-relaxed text-red-100">
-              {sanitizeMessageContent(error)}
-            </div>
-          </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
+}
+
+function NodeLogTimeline({
+  messages,
+  tasks,
+  runStatus,
+}: {
+  messages: ChatMessage[];
+  tasks: Task[];
+  runStatus: string;
+}) {
+  const stepStatusByTitle = React.useMemo(() => {
+    const workflow = tasks[0];
+    const subtasks = workflow?.subtasks ?? [];
+    return new Map(subtasks.map((step) => [step.title.toLowerCase(), step.status]));
+  }, [tasks]);
+
+  const grouped = React.useMemo(() => {
+    type NodeGroup = { id: string; title: string; logs: ChatMessage[] };
+    type TimelineEntry =
+      | { type: "message"; message: ChatMessage }
+      | { type: "node"; node: NodeGroup };
+
+    const entries: TimelineEntry[] = [];
+    let currentNode: NodeGroup | null = null;
+
+    for (const message of messages) {
+      const text = sanitizeMessageContent(message.content);
+      const started = parseStepMarker(text, "Starting");
+      if (started) {
+        currentNode = { id: message.id, title: started, logs: [] };
+        entries.push({ type: "node", node: currentNode });
+        continue;
+      }
+
+      const completed = parseStepMarker(text, "Completed");
+      if (completed) {
+        continue;
+      }
+
+      if (currentNode) {
+        currentNode.logs.push(message);
+      } else {
+        entries.push({ type: "message", message });
+      }
+    }
+
+    return entries;
+  }, [messages]);
+
+  return (
+    <div className="space-y-3">
+      {grouped.map((entry) => {
+        if (entry.type === "message") {
+          return <ChatBubble key={entry.message.id} message={entry.message} />;
+        }
+
+        const node = entry.node;
+        const status = stepStatusByTitle.get(node.title.toLowerCase());
+        const isDone = status === "completed";
+        const isActive = status === "in-progress";
+        const rowClass = isDone
+          ? "border-emerald-400/30 bg-emerald-500/10"
+          : isActive || runStatus === "running" || runStatus === "queued"
+            ? "border-amber-400/40 bg-amber-500/10"
+            : "border-white/10 bg-white/5";
+
+        const label = isDone ? "Complete" : isActive ? "In Progress" : "Started";
+
+        return (
+          <div key={node.id} className="space-y-2">
+            <div className={`rounded-xl border px-3 py-2 ${rowClass}`}>
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-medium text-white/90">{node.title}</p>
+                <span className="rounded-full border border-white/20 bg-white/10 px-2 py-0.5 text-[11px] text-white/80">
+                  {label}
+                </span>
+              </div>
+            </div>
+
+            {node.logs.length > 0 && (
+              <div className="ml-4 space-y-2 border-l border-white/10 pl-3">
+                {node.logs.map((message) => (
+                  <ChatBubble key={message.id} message={message} />
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function parseStepMarker(text: string, marker: "Starting" | "Completed"): string | null {
+  const match = text.match(new RegExp(`^${marker}:\\s*(.+?)\\.?$`, "i"));
+  return match?.[1]?.trim() || null;
 }
 
 function ChatBubble({ message: m }: { message: ChatMessage }) {
