@@ -54,6 +54,16 @@ function cleanTerminalOutput(message: string): string {
     .join("\n");
 }
 
+function parseLogTimestamp(raw: string, fallbackTime: number): number {
+  const match = raw.match(/^\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]/);
+  if (!match) return fallbackTime;
+
+  const [, hh, mm, ss] = match;
+  const base = new Date(fallbackTime);
+  base.setHours(Number(hh), Number(mm), Number(ss ?? 0), 0);
+  return base.getTime();
+}
+
 /* ================================================================
    SessionsPage â€” page-level orchestrator for migration sessions.
    All rendering is delegated to <Header>, <SessionSidebar>, and
@@ -157,12 +167,52 @@ export default function SessionsPage() {
       });
     }
 
-    const baseMessages: ChatMessage[] = Array.isArray(data.logs)
-      ? data.logs
-          .map((l: string) => cleanTerminalOutput(stripLogTags(l)))
-          .filter((l: string) => l.length > 0)
-          .map((l: string) => makeMessage("agent", l))
-      : [];
+    const runStart = Date.parse(typeof data.createdAt === "string" ? data.createdAt : "") || Date.now();
+    const timeline: Array<{ order: number; time: number; message: ChatMessage }> = [];
+    let order = 0;
+
+    if (Array.isArray(data.logs)) {
+      for (const rawLog of data.logs) {
+        if (typeof rawLog !== "string") continue;
+        const cleaned = cleanTerminalOutput(stripLogTags(rawLog));
+        if (!cleaned) continue;
+        timeline.push({
+          order: order++,
+          time: parseLogTimestamp(rawLog, runStart + order),
+          message: makeMessage("agent", cleaned),
+        });
+      }
+    }
+
+    if (Array.isArray(data.steps)) {
+      for (const step of data.steps) {
+        if (!step || typeof step !== "object") continue;
+        const label = typeof step.label === "string" ? step.label : "";
+        if (!label) continue;
+
+        const startedAt = typeof step.startedAt === "string" ? Date.parse(step.startedAt) : Number.NaN;
+        if (!Number.isNaN(startedAt)) {
+          timeline.push({
+            order: order++,
+            time: startedAt,
+            message: makeMessage("system", `Starting: ${label}.`),
+          });
+        }
+
+        const endedAt = typeof step.endedAt === "string" ? Date.parse(step.endedAt) : Number.NaN;
+        if (!Number.isNaN(endedAt) && step.status === "completed") {
+          timeline.push({
+            order: order++,
+            time: endedAt,
+            message: makeMessage("system", `Completed: ${label}.`),
+          });
+        }
+      }
+    }
+
+    timeline.sort((a, b) => (a.time === b.time ? a.order - b.order : a.time - b.time));
+    const baseMessages = timeline.map((item) => item.message);
+
     setMessages([...baseMessages, ...buildSqlExecutionMessages(s, e)]);
     if (typeof data.error === "string" && data.error.length) setError(data.error);
     setIsBusy(false);
@@ -646,4 +696,3 @@ export default function SessionsPage() {
     </div>
   );
 }
-
