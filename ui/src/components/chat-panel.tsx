@@ -320,40 +320,32 @@ function NodeLogTimeline({
   tasks: Task[];
   runStatus: string;
 }) {
-  const stepStatusByTitle = React.useMemo(() => {
-    const workflow = tasks[0];
-    const subtasks = workflow?.subtasks ?? [];
-    return new Map(subtasks.map((step) => [step.title.toLowerCase(), step.status]));
-  }, [tasks]);
+  const workflow = tasks[0];
+  const subtasks = workflow?.subtasks ?? [];
+
+  const stepStatusByTitle = new Map(subtasks.map((step) => [step.title.toLowerCase(), step.status]));
+
+  const hasMarkerMessages = React.useMemo(
+    () => messages.some((m) => parseStepMarker(sanitizeMessageContent(m.content), "Starting")),
+    [messages],
+  );
 
   return (
     <div className="space-y-3">
+      {!hasMarkerMessages &&
+        subtasks
+          .filter((step) => step.status !== "pending")
+          .map((step) => (
+            <StepCheckpointCard key={`fallback-${step.id}`} title={step.title} status={step.status} runStatus={runStatus} />
+          ))}
+
       {messages.map((message) => {
         const text = sanitizeMessageContent(message.content);
         const started = parseStepMarker(text, "Starting");
 
         if (started) {
           const status = stepStatusByTitle.get(started.toLowerCase());
-          const isDone = status === "completed";
-          const isActive = status === "in-progress";
-          const rowClass = isDone
-            ? "border-emerald-400/30 bg-emerald-500/10"
-            : isActive || runStatus === "running" || runStatus === "queued"
-              ? "border-amber-400/40 bg-amber-500/10"
-              : "border-white/10 bg-white/5";
-
-          const label = isDone ? "Complete" : isActive ? "In Progress" : "Started";
-
-          return (
-            <div key={message.id} className={`rounded-xl border px-3 py-2 ${rowClass}`}>
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-sm font-medium text-white/90">{started}</p>
-                <span className="rounded-full border border-white/20 bg-white/10 px-2 py-0.5 text-[11px] text-white/80">
-                  {label}
-                </span>
-              </div>
-            </div>
-          );
+          return <StepCheckpointCard key={message.id} title={started} status={status} runStatus={runStatus} />;
         }
 
         const completed = parseStepMarker(text, "Completed");
@@ -361,6 +353,37 @@ function NodeLogTimeline({
 
         return <ChatBubble key={message.id} message={message} />;
       })}
+    </div>
+  );
+}
+
+function StepCheckpointCard({
+  title,
+  status,
+  runStatus,
+}: {
+  title: string;
+  status?: string;
+  runStatus: string;
+}) {
+  const isDone = status === "completed";
+  const isActive = status === "in-progress";
+  const rowClass = isDone
+    ? "border-emerald-400/30 bg-emerald-500/10"
+    : isActive || runStatus === "running" || runStatus === "queued"
+      ? "border-amber-400/40 bg-amber-500/10"
+      : "border-white/10 bg-white/5";
+
+  const label = isDone ? "Complete" : isActive ? "In Progress" : "Started";
+
+  return (
+    <div className={`rounded-xl border px-3 py-2 ${rowClass}`}>
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-sm font-medium text-white/90">{title}</p>
+        <span className="rounded-full border border-white/20 bg-white/10 px-2 py-0.5 text-[11px] text-white/80">
+          {label}
+        </span>
+      </div>
     </div>
   );
 }
