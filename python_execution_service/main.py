@@ -146,9 +146,7 @@ def now_iso() -> str:
 
 
 def _serialize_run_record(run: RunRecord) -> Dict[str, Any]:
-    payload = asdict(run)
-    payload.pop("events", None)
-    return payload
+    return asdict(run)
 
 
 def _deserialize_run_record(payload: Dict[str, Any]) -> RunRecord:
@@ -187,6 +185,7 @@ def _deserialize_run_record(payload: Dict[str, Any]) -> RunRecord:
         error=payload.get("error"),
         outputDir=payload.get("outputDir", ""),
         ddlUploadPath=payload.get("ddlUploadPath", ""),
+        events=payload.get("events", []),
     )
 
 
@@ -732,7 +731,6 @@ def get_run(run_id: str, x_execution_token: Optional[str] = Header(default=None)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
         payload = asdict(run)
-        payload.pop("events", None)
         for artifact in payload["artifacts"]:
             artifact.pop("path", None)
         return payload
