@@ -162,12 +162,6 @@ export function ChatPanel({
                 />
               )}
 
-              {runId && !isAgentPhase && !isSessionFinished && (
-                <div className="shrink-0 rounded-2xl border border-blue-400/30 bg-blue-500/10 px-4 py-3 text-sm text-blue-100">
-                  Conversion pipeline is running. Agent chat will be enabled after CLI conversion completes.
-                </div>
-              )}
-
               <MessageList
                 tasks={tasks}
                 messages={messages}
@@ -320,11 +314,14 @@ function NodeLogTimeline({
   tasks: Task[];
   runStatus: string;
 }) {
-  const stepStatusByTitle = React.useMemo(() => {
-    const workflow = tasks[0];
-    const subtasks = workflow?.subtasks ?? [];
-    return new Map(subtasks.map((step) => [step.title.toLowerCase(), step.status]));
-  }, [tasks]);
+  const steps = React.useMemo(() => tasks[0]?.subtasks ?? [], [tasks]);
+  const startedStepTitles = React.useMemo(
+    () =>
+      steps
+        .filter((step) => step.status !== "pending")
+        .map((step) => step.title),
+    [steps],
+  );
 
   const grouped = React.useMemo(() => {
     type NodeGroup = { id: string; title: string; logs: ChatMessage[] };
@@ -333,14 +330,36 @@ function NodeLogTimeline({
       | { type: "node"; node: NodeGroup };
 
     const entries: TimelineEntry[] = [];
+    const nodeByTitle = new Map<string, NodeGroup>();
     let currentNode: NodeGroup | null = null;
+
+    const ensureNode = (title: string, idSeed: string) => {
+      const key = title.toLowerCase();
+      const existing = nodeByTitle.get(key);
+      if (existing) {
+        currentNode = existing;
+        return existing;
+      }
+      const created: NodeGroup = { id: `${idSeed}-${key}`, title, logs: [] };
+      nodeByTitle.set(key, created);
+      entries.push({ type: "node", node: created });
+      currentNode = created;
+      return created;
+    };
+
+    for (const title of startedStepTitles) {
+      ensureNode(title, "step");
+    }
+
+    if (entries.length > 0) {
+      currentNode = (entries[entries.length - 1] as { type: "node"; node: NodeGroup }).node;
+    }
 
     for (const message of messages) {
       const text = sanitizeMessageContent(message.content);
       const started = parseStepMarker(text, "Starting");
       if (started) {
-        currentNode = { id: message.id, title: started, logs: [] };
-        entries.push({ type: "node", node: currentNode });
+        ensureNode(started, message.id);
         continue;
       }
 
@@ -357,7 +376,12 @@ function NodeLogTimeline({
     }
 
     return entries;
-  }, [messages]);
+  }, [messages, startedStepTitles]);
+
+  const stepStatusByTitle = React.useMemo(
+    () => new Map(steps.map((step) => [step.title.toLowerCase(), step.status])),
+    [steps],
+  );
 
   return (
     <div className="space-y-3">
