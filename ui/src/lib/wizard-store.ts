@@ -6,23 +6,56 @@ export const SOURCE_LANGUAGES = [
   { id: 'Redshift', label: 'Amazon Redshift' },
   { id: 'Oracle', label: 'Oracle' },
   { id: 'Teradata', label: 'Teradata' },
+  { id: 'Synapse', label: 'Azure Synapse' },
   { id: 'BigQuery', label: 'Google BigQuery' },
-  { id: 'Databricks', label: 'Databricks' },
+  { id: 'Databricks', label: 'Databricks SQL' },
   { id: 'Greenplum', label: 'Greenplum' },
-  { id: 'Sybase', label: 'SAP Sybase' },
+  { id: 'Sybase', label: 'Sybase IQ' },
   { id: 'Postgresql', label: 'PostgreSQL' },
   { id: 'Netezza', label: 'IBM Netezza' },
-  { id: 'Spark', label: 'Apache Spark' },
+  { id: 'Spark', label: 'Spark SQL' },
   { id: 'Vertica', label: 'Vertica' },
   { id: 'Hive', label: 'Apache Hive' },
-  { id: 'Db2', label: 'IBM Db2' },
+  { id: 'Db2', label: 'IBM DB2' },
 ] as const;
 
 export type SourceLanguage = (typeof SOURCE_LANGUAGES)[number]['id'];
 
-// Wizard steps - 4 steps as requested
+export const SCRIPT_TYPES = [
+  'Tables',
+  'Views',
+  'Stored Procedures',
+  'Functions',
+  'Packages',
+  'BTEQ',
+  'MLOAD',
+  'TPUMP',
+] as const;
+
+export type ScriptType = (typeof SCRIPT_TYPES)[number];
+
+export const SUPPORTED_SCRIPT_TYPES: Record<SourceLanguage, ScriptType[]> = {
+  Teradata: ['Tables', 'Views', 'Stored Procedures', 'Functions', 'BTEQ', 'MLOAD', 'TPUMP'],
+  Oracle: ['Tables', 'Views', 'Stored Procedures', 'Functions', 'Packages'],
+  SqlServer: ['Tables', 'Views', 'Stored Procedures', 'Functions'],
+  Redshift: ['Tables', 'Views', 'Stored Procedures', 'Functions'],
+  Synapse: ['Tables', 'Views', 'Stored Procedures', 'Functions'],
+  Sybase: ['Tables', 'Views', 'Stored Procedures', 'Functions'],
+  BigQuery: ['Tables', 'Views'],
+  Greenplum: ['Tables', 'Views'],
+  Netezza: ['Tables', 'Views'],
+  Postgresql: ['Tables', 'Views'],
+  Spark: ['Tables', 'Views'],
+  Databricks: ['Tables', 'Views'],
+  Vertica: ['Tables', 'Views'],
+  Hive: ['Tables', 'Views'],
+  Db2: ['Tables', 'Views', 'Stored Procedures', 'Functions'],
+};
+
+// Wizard steps
 export const WIZARD_STEPS = [
   { id: 'language', label: 'Source Language', description: 'Select your source database' },
+  { id: 'scriptType', label: 'Script Type', description: 'Select script types to convert' },
   { id: 'files', label: 'Source Files', description: 'Upload your SQL files' },
   { id: 'mapping', label: 'Schema Mapping', description: 'Upload schema mapping files' },
   { id: 'summary', label: 'Summary', description: 'Review and start migration' },
@@ -44,15 +77,18 @@ export interface WizardState {
   completedSteps: WizardStepId[];
   
   // Step 1: Language
-  sourceLanguage: SourceLanguage;
+  sourceLanguage: SourceLanguage | '';
+
+  // Step 2: Script Type
+  scriptTypes: ScriptType[];
   
-  // Step 2: Files
+  // Step 3: Files
   sourceFiles: WizardFile[];
   
-  // Step 3: Schema Mapping
+  // Step 4: Schema Mapping
   mappingFiles: WizardFile[];
   
-  // Step 4: Summary
+  // Step 5: Summary
   isStarting: boolean;
   startError?: string;
 }
@@ -61,11 +97,23 @@ export interface WizardState {
 const initialState: WizardState = {
   currentStep: 'language',
   completedSteps: [],
-  sourceLanguage: 'Teradata',
+  sourceLanguage: '',
+  scriptTypes: [],
   sourceFiles: [],
   mappingFiles: [],
   isStarting: false,
 };
+
+function getVisibleStepsForState(wizard: WizardState): readonly (typeof WIZARD_STEPS)[number][] {
+  if (!wizard.sourceLanguage) {
+    return WIZARD_STEPS.filter((step) => step.id !== 'scriptType');
+  }
+  return WIZARD_STEPS;
+}
+
+export function getVisibleWizardSteps() {
+  return getVisibleStepsForState(state);
+}
 
 // Create a simple store using React state pattern
 let state = { ...initialState };
@@ -91,7 +139,31 @@ export function setStep(step: WizardStepId) {
 }
 
 export function setSourceLanguage(language: SourceLanguage) {
-  state = { ...state, sourceLanguage: language };
+  const supported = SUPPORTED_SCRIPT_TYPES[language] ?? [];
+  const nextScriptTypes = state.scriptTypes.filter((type) => supported.includes(type));
+  state = { ...state, sourceLanguage: language, scriptTypes: nextScriptTypes };
+  notifyListeners();
+}
+
+export function setScriptTypes(scriptTypes: ScriptType[]) {
+  const supported = state.sourceLanguage ? SUPPORTED_SCRIPT_TYPES[state.sourceLanguage] ?? [] : [];
+  const nextScriptTypes = scriptTypes.filter((type) => supported.includes(type));
+  state = { ...state, scriptTypes: nextScriptTypes };
+  notifyListeners();
+}
+
+export function toggleScriptType(scriptType: ScriptType) {
+  const supported = state.sourceLanguage ? SUPPORTED_SCRIPT_TYPES[state.sourceLanguage] ?? [] : [];
+  if (!supported.includes(scriptType)) {
+    return;
+  }
+
+  const current = state.scriptTypes;
+  if (current.includes(scriptType)) {
+    state = { ...state, scriptTypes: current.filter((item) => item !== scriptType) };
+  } else {
+    state = { ...state, scriptTypes: [...current, scriptType] };
+  }
   notifyListeners();
 }
 
@@ -148,7 +220,8 @@ export function markStepCompleted(step: WizardStepId) {
 
 export function goToNextStep() {
   const { currentStep, completedSteps } = state;
-  const currentIndex = WIZARD_STEPS.findIndex(s => s.id === currentStep);
+  const visibleSteps = getVisibleStepsForState(state);
+  const currentIndex = visibleSteps.findIndex(s => s.id === currentStep);
   
   // Mark current step as completed
   if (!completedSteps.includes(currentStep)) {
@@ -156,18 +229,19 @@ export function goToNextStep() {
   }
   
   // Go to next step
-  if (currentIndex < WIZARD_STEPS.length - 1) {
-    state = { ...state, currentStep: WIZARD_STEPS[currentIndex + 1].id };
+  if (currentIndex < visibleSteps.length - 1) {
+    state = { ...state, currentStep: visibleSteps[currentIndex + 1].id };
   }
   notifyListeners();
 }
 
 export function goToPreviousStep() {
   const { currentStep } = state;
-  const currentIndex = WIZARD_STEPS.findIndex(s => s.id === currentStep);
+  const visibleSteps = getVisibleStepsForState(state);
+  const currentIndex = visibleSteps.findIndex(s => s.id === currentStep);
   
   if (currentIndex > 0) {
-    state = { ...state, currentStep: WIZARD_STEPS[currentIndex - 1].id };
+    state = { ...state, currentStep: visibleSteps[currentIndex - 1].id };
     notifyListeners();
   }
 }
@@ -180,7 +254,7 @@ export function resetWizard() {
 // Computed helpers
 export function getCurrentStepIndex(): number {
   const { currentStep } = state;
-  return WIZARD_STEPS.findIndex(s => s.id === currentStep);
+  return getVisibleStepsForState(state).findIndex(s => s.id === currentStep);
 }
 
 export function isFirstStep(): boolean {
@@ -188,7 +262,7 @@ export function isFirstStep(): boolean {
 }
 
 export function isLastStep(): boolean {
-  return getCurrentStepIndex() === WIZARD_STEPS.length - 1;
+  return getCurrentStepIndex() === getVisibleStepsForState(state).length - 1;
 }
 
 export function canProceedToNext(): boolean {
@@ -197,6 +271,8 @@ export function canProceedToNext(): boolean {
   switch (currentState.currentStep) {
     case 'language':
       return !!currentState.sourceLanguage;
+    case 'scriptType':
+      return currentState.scriptTypes.length > 0;
     case 'files':
       return currentState.sourceFiles.length > 0;
     case 'mapping':

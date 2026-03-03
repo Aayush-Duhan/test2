@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from agentic_core.decision import should_continue, should_continue_after_execute
@@ -221,11 +221,6 @@ def persist_runs_locked() -> None:
             pass
 
 
-def persist_runs() -> None:
-    with RUN_LOCK:
-        persist_runs_locked()
-
-
 def load_persisted_runs() -> None:
     if not RUN_INDEX_PATH.exists():
         return
@@ -284,8 +279,9 @@ def _clean_terminal_output(message: str) -> str:
     lines: List[str] = []
     for raw_line in ansi_stripped.splitlines():
         line = raw_line
+        line = re.sub(r"[¿´³]", " ", line)
         line = re.sub(r"[\u2500-\u257f\u2580-\u259f]", " ", line)
-        line = re.sub(r"[À-ÿ]", " ", line)
+        line = re.sub(r"[\u00c0-\u00ff]", " ", line)
         line = re.sub(r"[=]{3,}", " ", line)
         line = re.sub(r"[?]{5,}", " ", line)
         line = re.sub(r"\s{2,}", " ", line).strip()
@@ -295,7 +291,6 @@ def _clean_terminal_output(message: str) -> str:
             continue
         lines.append(line)
     return "\n".join(lines)
-
 
 def _sanitize_content(message: str, *, strip_prefix: bool = True) -> str:
     text = str(message)
@@ -396,7 +391,7 @@ def update_step(run: RunRecord, step_id: str, status: str) -> None:
 
 
 def add_log(run: RunRecord, message: str, step_id: Optional[str] = None) -> None:
-    line = str(message).strip()
+    line = _sanitize_content(str(message), strip_prefix=False).strip()
     if not line:
         return
     with RUN_LOCK:
@@ -996,17 +991,3 @@ async def stream_events(run_id: str, x_execution_token: Optional[str] = Header(d
     return StreamingResponse(iterator(), media_type="text/event-stream")
 
 
-@app.get("/v1/runs/{run_id}/artifacts/{name}")
-def download_artifact(run_id: str, name: str, x_execution_token: Optional[str] = Header(default=None)):
-    require_auth(x_execution_token)
-    with RUN_LOCK:
-        run = RUNS.get(run_id)
-        if not run:
-            raise HTTPException(status_code=404, detail="Run not found")
-        artifact = next((item for item in run.artifacts if item.name == name), None)
-        if not artifact:
-            raise HTTPException(status_code=404, detail="Artifact not found")
-        file_path = artifact.path
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Artifact file missing")
-    return FileResponse(path=file_path, filename=name)

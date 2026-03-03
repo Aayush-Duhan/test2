@@ -162,12 +162,6 @@ export function ChatPanel({
                 />
               )}
 
-              {runId && !isAgentPhase && !isSessionFinished && (
-                <div className="shrink-0 rounded-2xl border border-blue-400/30 bg-blue-500/10 px-4 py-3 text-sm text-blue-100">
-                  Conversion pipeline is running. Agent chat will be enabled after CLI conversion completes.
-                </div>
-              )}
-
               <MessageList
                 tasks={tasks}
                 messages={messages}
@@ -405,7 +399,7 @@ function ChatBubble({ message: m }: { message: ChatMessage }) {
         <details className={`group max-w-[90%] rounded-2xl px-3 py-2 ${rowClass}`}>
           <summary className="flex cursor-pointer list-none items-center gap-2 text-sm leading-relaxed">
             <ChevronRight className="h-4 w-4 shrink-0 transition-transform group-open:rotate-90" />
-            <span className="font-medium">{cleanTerminalArtifacts(m.content)}</span>
+            <span className="font-medium">{m.content}</span>
           </summary>
           <div className="mt-3 space-y-2 border-t border-white/10 pt-3">
             {m.sql.statement && <SqlBlockSection title="Query" content={m.sql.statement} />}
@@ -429,7 +423,7 @@ function ChatBubble({ message: m }: { message: ChatMessage }) {
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div className={`max-w-[90%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-relaxed ${bubbleClass}`}>
-        {cleanTerminalArtifacts(buildPlainMessageBody(m))}
+        {buildPlainMessageBody(m)}
       </div>
     </div>
   );
@@ -448,23 +442,21 @@ function SqlBlockSection({
     <div>
       <div className="mb-1 flex items-center gap-2">
         <span
-          className={`rounded-full border px-2 py-0.5 text-[11px] ${
-            isError
+          className={`rounded-full border px-2 py-0.5 text-[11px] ${isError
               ? "border-red-400/40 bg-red-500/15 text-red-100"
               : "border-white/20 bg-white/10 text-white/80"
-          }`}
+            }`}
         >
           {title}
         </span>
       </div>
       <pre
-        className={`max-h-52 overflow-auto whitespace-pre-wrap rounded-xl border px-3 py-2 text-xs ${
-          isError
+        className={`max-h-52 overflow-auto whitespace-pre-wrap rounded-xl border px-3 py-2 text-xs ${isError
             ? "border-red-400/30 bg-red-500/10 text-red-100"
             : "border-white/10 bg-black/30 text-white/85"
-        }`}
+          }`}
       >
-        {cleanTerminalArtifacts(content)}
+        {content}
       </pre>
     </div>
   );
@@ -479,12 +471,5 @@ function buildPlainMessageBody(message: ChatMessage): string {
   if (message.sql?.failedStatement) chunks.push(`Failed SQL:\n${message.sql.failedStatement}`);
 
   return chunks.filter((chunk) => chunk.trim().length > 0).join("\n\n");
-}
-
-function cleanTerminalArtifacts(message: string): string {
-  return message
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/\u0000/g, "")
-    .trim();
 }
 

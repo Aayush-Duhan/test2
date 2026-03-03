@@ -96,12 +96,3 @@ export async function getPythonRunEvents(runId: string) {
     cache: "no-store",
   });
 }
-
-export async function getPythonArtifact(runId: string, name: string) {
-  return fetch(`${baseUrl}/v1/runs/${runId}/artifacts/${encodeURIComponent(name)}`, {
-    headers: {
-      "X-Execution-Token": executionToken,
-    },
-    cache: "no-store",
-  });
-}

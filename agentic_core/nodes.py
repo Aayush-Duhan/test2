@@ -24,7 +24,7 @@ def _decode_cli_stream(data: bytes) -> str:
     """Decode CLI bytes robustly across Windows code pages."""
     if not data:
         return ""
-    for encoding in ("utf-8", "utf-8-sig", "cp1252", "cp437", "latin-1"):
+    for encoding in ("utf-8", "utf-8-sig", "cp437", "cp1252", "latin-1"):
         try:
             return data.decode(encoding).strip()
         except Exception:

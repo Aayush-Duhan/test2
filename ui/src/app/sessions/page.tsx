@@ -19,9 +19,13 @@ import {
 import {
   isActive,
   makeMessage,
+  makeThinkingMessage,
   mergeSteps,
   buildTasks,
   flattenExecutionLog,
+  makeSqlStatementMessage,
+  makeSqlErrorMessage,
+  buildSqlExecutionMessages,
 } from "@/lib/chat-helpers";
 import {
   getWizardState,
@@ -37,6 +41,132 @@ function isChatMessage(value: unknown): value is ChatMessage {
     typeof row.kind === "string" &&
     typeof row.content === "string"
   );
+}
+
+type PersistedRunEvent = {
+  type?: string;
+  payload?: Record<string, unknown>;
+};
+
+function buildHydratedMessagesFallback(
+  events: unknown,
+  logs: unknown,
+  statements: ExecuteStatementEvent[],
+  errors: ExecuteErrorEvent[],
+): ChatMessage[] {
+  const timeline: ChatMessage[] = [];
+  let usedEventTimeline = false;
+
+  if (Array.isArray(events)) {
+    const hasChatMessageEvents = events.some((raw) => {
+      if (!raw || typeof raw !== "object") return false;
+      const event = raw as PersistedRunEvent;
+      if (event.type !== "chat:message") return false;
+      return isChatMessage(event.payload);
+    });
+
+    for (const raw of events) {
+      if (!raw || typeof raw !== "object") continue;
+      const event = raw as PersistedRunEvent;
+      const type = typeof event.type === "string" ? event.type : "";
+      const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+
+      if (type === "chat:message" && isChatMessage(payload)) {
+        usedEventTimeline = true;
+        timeline.push(payload);
+        continue;
+      }
+
+      if (hasChatMessageEvents) {
+        // When canonical chat events exist, ignore legacy event mirrors to prevent duplicates.
+        continue;
+      }
+
+      if (type === "step:started") {
+        usedEventTimeline = true;
+        const label = typeof payload.label === "string" ? payload.label : payload.stepId;
+        if (typeof label === "string" && label.length > 0) {
+          timeline.push(makeMessage("system", `Starting: ${label}.`, "step_started"));
+        }
+        continue;
+      }
+
+      if (type === "step:completed") {
+        usedEventTimeline = true;
+        const label = typeof payload.label === "string" ? payload.label : payload.stepId;
+        if (typeof label === "string" && label.length > 0) {
+          timeline.push(makeMessage("system", `Completed: ${label}.`, "step_completed"));
+        }
+        continue;
+      }
+
+      if (type === "log") {
+        usedEventTimeline = true;
+        const message = typeof payload.message === "string" ? payload.message.trim() : "";
+        if (message.length > 0) {
+          timeline.push(makeMessage("agent", message, "log"));
+        }
+        continue;
+      }
+
+      if (type === "selfheal:iteration") {
+        usedEventTimeline = true;
+        timeline.push(
+          makeThinkingMessage(
+            `Self-heal iteration ${String(payload.iteration ?? "?")}\nAnalyzing execution errors and generating fixes via Snowflake Cortex...`
+          )
+        );
+        continue;
+      }
+
+      if (type === "execute_sql:statement") {
+        usedEventTimeline = true;
+        timeline.push(makeSqlStatementMessage(payload as ExecuteStatementEvent));
+        continue;
+      }
+
+      if (type === "execute_sql:error") {
+        usedEventTimeline = true;
+        const executeError = payload as ExecuteErrorEvent;
+        const missing =
+          (executeError.errorType ?? "").toLowerCase().includes("missing") ||
+          (executeError.errorMessage ?? "").toLowerCase().includes("does not exist");
+        timeline.push(
+          makeSqlErrorMessage(
+            executeError,
+            missing ? "Execution paused: missing table/object detected." : undefined
+          )
+        );
+        continue;
+      }
+
+      if (type === "run:completed") {
+        usedEventTimeline = true;
+        timeline.push(makeMessage("system", "Migration completed.", "run_status"));
+        continue;
+      }
+
+      if (type === "run:failed") {
+        usedEventTimeline = true;
+        const reason = typeof payload.reason === "string" ? payload.reason : "Run failed";
+        timeline.push(makeMessage("error", reason, "run_status"));
+      }
+    }
+  }
+
+  if (!usedEventTimeline && Array.isArray(logs)) {
+    for (const raw of logs) {
+      if (typeof raw === "string" && raw.trim().length > 0) {
+        timeline.push(makeMessage("agent", raw, "log"));
+      }
+    }
+  }
+
+  if (!usedEventTimeline) {
+    return [...timeline, ...buildSqlExecutionMessages(statements, errors)];
+  }
+
+  return timeline;
 }
 
 /* ================================================================
@@ -91,6 +221,7 @@ export default function SessionsPage() {
   const [isAgentThinking, setIsAgentThinking] = React.useState(false);
   /** Tracks the currently running step to contextualise log messages */
   const activeStepRef = React.useRef<string | null>(null);
+  const chatSchemaReadyRef = React.useRef(false);
 
   const ddlFileInputRef = React.useRef<HTMLInputElement>(null);
   const startRef = React.useRef<number | null>(null);
@@ -145,7 +276,13 @@ export default function SessionsPage() {
     const hydratedMessages = Array.isArray(data.messages)
       ? data.messages.filter(isChatMessage)
       : [];
-    setMessages(hydratedMessages);
+    if (hydratedMessages.length > 0) {
+      chatSchemaReadyRef.current = true;
+      setMessages(hydratedMessages);
+    } else {
+      chatSchemaReadyRef.current = false;
+      setMessages(buildHydratedMessagesFallback(data.events, data.logs, s, e));
+    }
     if (typeof data.error === "string" && data.error.length) setError(data.error);
     setIsBusy(false);
   }, []);
@@ -156,6 +293,17 @@ export default function SessionsPage() {
       const res = await fetch(`/api/runs/${targetRunId}`, { cache: "no-store" });
       if (!res.ok) return;
       const data = await res.json();
+      const snapshotMessages = Array.isArray(data.messages)
+        ? data.messages.filter(isChatMessage)
+        : [];
+      if (snapshotMessages.length > 0) {
+        chatSchemaReadyRef.current = true;
+        setMessages(snapshotMessages);
+      } else if (!chatSchemaReadyRef.current) {
+        const ss = flattenExecutionLog(data.executionLog);
+        const se: ExecuteErrorEvent[] = Array.isArray(data.executionErrors) ? data.executionErrors : [];
+        setMessages(buildHydratedMessagesFallback(data.events, data.logs, ss, se));
+      }
 
       const nextStatus = typeof data.status === "string" ? data.status : "idle";
       setStatus(nextStatus);
@@ -438,6 +586,7 @@ export default function SessionsPage() {
     source.addEventListener("chat:message", (event) => {
       const payload = JSON.parse((event as MessageEvent).data);
       if (!isChatMessage(payload)) return;
+      chatSchemaReadyRef.current = true;
       setMessages((prev) => [...prev, payload]);
       if (payload.kind === "thinking") {
         setIsAgentThinking(true);
@@ -448,6 +597,12 @@ export default function SessionsPage() {
       const payload = JSON.parse((event as MessageEvent).data);
       activeStepRef.current = payload.stepId ?? null;
       setSteps((prev) => prev.map((s) => (s.id === payload.stepId ? { ...s, status: "running" } : s)));
+      if (!chatSchemaReadyRef.current) {
+        const label = typeof payload?.label === "string" ? payload.label : payload.stepId;
+        if (label) {
+          setMessages((prev) => [...prev, makeMessage("system", `Starting: ${label}.`, "step_started")]);
+        }
+      }
 
       /* Turn on the "thinking" indicator for LLM-heavy steps */
       const thinkingSteps = ["self_heal", "convert_code", "validate"];
@@ -469,6 +624,12 @@ export default function SessionsPage() {
       activeStepRef.current = null;
       setIsAgentThinking(false);
       setSteps((prev) => prev.map((s) => (s.id === payload.stepId ? { ...s, status: "completed" } : s)));
+      if (!chatSchemaReadyRef.current) {
+        const label = typeof payload?.label === "string" ? payload.label : payload.stepId;
+        if (label) {
+          setMessages((prev) => [...prev, makeMessage("system", `Completed: ${label}.`, "step_completed")]);
+        }
+      }
     });
 
     source.addEventListener("run:completed", () => {
@@ -480,6 +641,10 @@ export default function SessionsPage() {
         status: "Succeeded",
         elapsedMs: startRef.current ? Date.now() - startRef.current : prev.elapsedMs,
       }));
+      if (!chatSchemaReadyRef.current) {
+        setMessages((prev) => [...prev, makeMessage("system", "Migration completed.", "run_status")]);
+      }
+      void reconcileRunSnapshot(runId);
       reloadSidebar();
     });
 
@@ -499,7 +664,25 @@ export default function SessionsPage() {
         elapsedMs: startRef.current ? Date.now() - startRef.current : prev.elapsedMs,
       }));
       if (paused) setRequiresDdlUpload(true);
+      if (!chatSchemaReadyRef.current) {
+        setMessages((prev) => [...prev, makeMessage("error", paused ? `Execution paused: ${reason}` : reason, "run_status")]);
+      }
+      void reconcileRunSnapshot(runId);
       reloadSidebar();
+    });
+
+    source.addEventListener("log", (event) => {
+      if (chatSchemaReadyRef.current) return;
+      const payload = JSON.parse((event as MessageEvent).data);
+      const message = typeof payload?.message === "string" ? payload.message.trim() : "";
+      if (!message) return;
+      const thinkingSteps = ["self_heal", "convert_code", "validate"];
+      const step = activeStepRef.current;
+      if (step && thinkingSteps.includes(step)) {
+        setMessages((prev) => [...prev, makeThinkingMessage(message)]);
+      } else {
+        setMessages((prev) => [...prev, makeMessage("agent", message, "log")]);
+      }
     });
 
     source.addEventListener("selfheal:iteration", (event) => {
@@ -507,6 +690,14 @@ export default function SessionsPage() {
       const iter = Number(payload?.iteration ?? 0);
       if (Number.isFinite(iter)) setSelfHealIteration(iter);
       setIsAgentThinking(true);
+      if (!chatSchemaReadyRef.current) {
+        setMessages((prev) => [
+          ...prev,
+          makeThinkingMessage(
+            `Self-heal iteration ${payload?.iteration ?? "?"}\nAnalyzing execution errors and generating fixes via Snowflake Cortex...`
+          ),
+        ]);
+      }
     });
 
     source.addEventListener("execute_sql:statement", (event) => {

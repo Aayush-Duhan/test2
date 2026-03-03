@@ -1,16 +1,19 @@
 "use client";
 
 import * as React from "react";
-import { ChevronLeft, ChevronRight, Check, Database, FileText, GitBranch, CheckCircle2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Check, Database, FileText, GitBranch, CheckCircle2, Code2 } from "lucide-react";
 import {
   useWizardState,
-  WIZARD_STEPS,
+  getVisibleWizardSteps,
   SOURCE_LANGUAGES,
+  SUPPORTED_SCRIPT_TYPES,
   type WizardStepId,
   type WizardFile,
+  type ScriptType,
   goToNextStep,
   goToPreviousStep,
   setSourceLanguage,
+  toggleScriptType,
   addSourceFiles,
   removeSourceFile,
   addMappingFiles,
@@ -30,6 +33,7 @@ function cn(...inputs: (string | boolean | undefined | null)[]): string {
 // Step icons
 const STEP_ICONS: Record<WizardStepId, React.ElementType> = {
   language: Database,
+  scriptType: Code2,
   files: FileText,
   mapping: GitBranch,
   summary: CheckCircle2,
@@ -67,7 +71,61 @@ const LanguageStep = React.memo(function LanguageStep() {
   );
 });
 
-// Step 2: File Selection
+// Step 2: Script Type Selection
+const ScriptTypeStep = React.memo(function ScriptTypeStep() {
+  const { sourceLanguage, scriptTypes } = useWizardState();
+
+  if (!sourceLanguage) {
+    return (
+      <div className="space-y-4">
+        <h3 className="text-lg font-semibold text-white">Select Script Type</h3>
+        <p className="text-sm text-[#8a8a8f]">
+          Select a source language first to see supported script types.
+        </p>
+      </div>
+    );
+  }
+
+  const supportedTypes = SUPPORTED_SCRIPT_TYPES[sourceLanguage] ?? [];
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h3 className="text-lg font-semibold text-white mb-2">Select Script Types</h3>
+        <p className="text-sm text-[#8a8a8f] mb-4">
+          Choose the script types you plan to upload for {SOURCE_LANGUAGES.find((l) => l.id === sourceLanguage)?.label}.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {supportedTypes.map((scriptType: ScriptType) => {
+          const isSelected = scriptTypes.includes(scriptType);
+          return (
+            <button
+              key={scriptType}
+              onClick={() => toggleScriptType(scriptType)}
+              className={cn(
+                "p-3 rounded-lg border text-left transition-all duration-200 flex items-center justify-between",
+                isSelected
+                  ? "border-[#4da5fc] bg-[#4da5fc]/10 text-white"
+                  : "border-[#333] bg-[#1a1a1a] text-[#8a8a8f] hover:border-[#444] hover:text-white"
+              )}
+            >
+              <span className="text-sm font-medium">{scriptType}</span>
+              {isSelected && <Check className="w-4 h-4 text-[#4da5fc]" />}
+            </button>
+          );
+        })}
+      </div>
+
+      <p className="text-xs text-[#666]">
+        Select at least one script type to continue.
+      </p>
+    </div>
+  );
+});
+
+// Step 3: File Selection
 const FilesStep = React.memo(function FilesStep() {
   const { sourceFiles } = useWizardState();
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -170,7 +228,7 @@ const FilesStep = React.memo(function FilesStep() {
   );
 });
 
-// Step 3: Schema Mapping
+// Step 4: Schema Mapping
 const MappingStep = React.memo(function MappingStep() {
   const { mappingFiles } = useWizardState();
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -277,9 +335,9 @@ const MappingStep = React.memo(function MappingStep() {
   );
 });
 
-// Step 4: Summary
+// Step 5: Summary
 const SummaryStep = React.memo(function SummaryStep() {
-  const { sourceLanguage, sourceFiles, mappingFiles, isStarting, startError } = useWizardState();
+  const { sourceLanguage, scriptTypes, sourceFiles, mappingFiles, isStarting, startError } = useWizardState();
 
   const language = SOURCE_LANGUAGES.find((l) => l.id === sourceLanguage);
 
@@ -300,6 +358,19 @@ const SummaryStep = React.memo(function SummaryStep() {
             <div>
               <p className="text-xs text-[#8a8a8f]">Source Database</p>
               <p className="text-sm font-medium text-white">{language?.label}</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Script Types */}
+        <div className="p-4 bg-[#1a1a1a] rounded-lg border border-[#333]">
+          <div className="flex items-center gap-3">
+            <Code2 className="w-5 h-5 text-[#4da5fc]" />
+            <div>
+              <p className="text-xs text-[#8a8a8f]">Script Types</p>
+              <p className="text-sm font-medium text-white">
+                {scriptTypes.length > 0 ? scriptTypes.join(", ") : "None selected"}
+              </p>
             </div>
           </div>
         </div>
@@ -371,6 +442,8 @@ const StepContent = React.memo(function StepContent({ step }: { step: WizardStep
   switch (step) {
     case "language":
       return <LanguageStep />;
+    case "scriptType":
+      return <ScriptTypeStep />;
     case "files":
       return <FilesStep />;
     case "mapping":
@@ -390,7 +463,8 @@ interface SetupWizardProps {
 
 // Main Wizard Component
 export const SetupWizard = React.memo(function SetupWizard({ onStartMigration, isBusy = false }: SetupWizardProps) {
-  const { currentStep, completedSteps, sourceFiles, isStarting } = useWizardState();
+  const { currentStep, completedSteps, sourceLanguage, sourceFiles, isStarting } = useWizardState();
+  const visibleSteps = React.useMemo(() => getVisibleWizardSteps(), [sourceLanguage]);
   const canProceed = canProceedToNext();
   const first = isFirstStep();
   const last = isLastStep();
@@ -420,15 +494,18 @@ export const SetupWizard = React.memo(function SetupWizard({ onStartMigration, i
     <div className="w-full max-w-2xl mx-auto">
       {/* Step indicator */}
       <div className="mb-8">
-        <div className="grid grid-cols-4 items-start">
-          {WIZARD_STEPS.map((step, index) => {
+        <div
+          className="grid items-start"
+          style={{ gridTemplateColumns: `repeat(${visibleSteps.length}, minmax(0, 1fr))` }}
+        >
+          {visibleSteps.map((step, index) => {
             const Icon = STEP_ICONS[step.id];
             const isActive = step.id === currentStep;
             const isCompleted = completedSteps.includes(step.id);
 
             return (
               <div key={step.id} className="relative flex flex-col items-center px-2">
-                {index < WIZARD_STEPS.length - 1 && (
+                {index < visibleSteps.length - 1 && (
                   <div
                     className={cn(
                       "absolute top-5 left-1/2 ml-6 h-0.5 w-[calc(100%-3rem)]",
