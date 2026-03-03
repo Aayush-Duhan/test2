@@ -157,13 +157,13 @@ export function Workbench({ chatStarted, isStreaming }: WorkbenchProps) {
       <AnimatePresence>
         {showWorkbench && (
           <motion.div
-            initial={{ width: 0, opacity: 0 }}
-            animate={{ width: 580, opacity: 1 }}
-            exit={{ width: 0, opacity: 0 }}
+            initial={{ width: "0%", opacity: 0 }}
+            animate={{ width: "50%", opacity: 1 }}
+            exit={{ width: "0%", opacity: 0 }}
             transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
             className="z-40 h-full shrink-0 overflow-hidden"
           >
-            <div className="h-full w-[580px] box-border p-4 pl-0">
+            <div className="h-full w-full box-border p-4 pl-0">
               <div className="h-full flex flex-col bg-[#0d0d0d] border border-white/10 shadow-lg rounded-lg overflow-hidden">
                 {/* Header */}
                 <div className="flex items-center px-3 py-2 border-b border-white/10 bg-[#0a0a0a]">

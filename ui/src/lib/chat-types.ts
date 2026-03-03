@@ -38,7 +38,14 @@ export type ArtifactSummary = { name: string; type: string; createdAt: string };
 /* ── Chat messages ───────────────────────────────────────── */
 
 export type ChatMessageRole = "system" | "agent" | "error" | "user";
-export type ChatMessageKind = "text" | "sql_statement" | "sql_error" | "thinking";
+export type ChatMessageKind =
+  | "step_started"
+  | "step_completed"
+  | "log"
+  | "thinking"
+  | "sql_statement"
+  | "sql_error"
+  | "run_status";
 
 export type ChatSqlDetails = {
   statement?: string;
@@ -49,9 +56,11 @@ export type ChatSqlDetails = {
 
 export type ChatMessage = {
   id: string;
+  ts?: string;
   role: ChatMessageRole;
   content: string;
   kind: ChatMessageKind;
+  step?: { id: string; label: string };
   sql?: ChatSqlDetails;
 };
 

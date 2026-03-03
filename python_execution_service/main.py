@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -108,6 +109,7 @@ class RunRecord:
     selfHealIteration: int = 0
     error: Optional[str] = None
     events: List[Dict[str, Any]] = field(default_factory=list)
+    messages: List[Dict[str, Any]] = field(default_factory=list)
     outputDir: str = ""
     ddlUploadPath: str = ""
 
@@ -139,6 +141,7 @@ STEP_LABELS = {
 
 app = FastAPI(title="Python Execution Service", version="0.1.0")
 logger = logging.getLogger(__name__)
+THINKING_STEP_IDS = {"self_heal", "convert_code", "validate"}
 
 
 def now_iso() -> str:
@@ -186,6 +189,7 @@ def _deserialize_run_record(payload: Dict[str, Any]) -> RunRecord:
         outputDir=payload.get("outputDir", ""),
         ddlUploadPath=payload.get("ddlUploadPath", ""),
         events=payload.get("events", []),
+        messages=payload.get("messages", []),
     )
 
 
@@ -271,6 +275,75 @@ def append_event(run: RunRecord, event_type: str, payload: Dict[str, Any]) -> No
         handle.write(json.dumps(event) + "\n")
 
 
+def _strip_log_tags(message: str) -> str:
+    return re.sub(r"^\s*(?:\[[^\]]+\]\s*)+", "", message).strip()
+
+
+def _clean_terminal_output(message: str) -> str:
+    ansi_stripped = re.sub(r"\u001b\[[0-?]*[ -/]*[@-~]", "", message)
+    lines: List[str] = []
+    for raw_line in ansi_stripped.splitlines():
+        line = raw_line
+        line = re.sub(r"[\u2500-\u257f\u2580-\u259f]", " ", line)
+        line = re.sub(r"[À-ÿ]", " ", line)
+        line = re.sub(r"[=]{3,}", " ", line)
+        line = re.sub(r"[?]{5,}", " ", line)
+        line = re.sub(r"\s{2,}", " ", line).strip()
+        if not line:
+            continue
+        if re.fullmatch(r"[=\-_*~.#|:+`^]+", line):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _sanitize_content(message: str, *, strip_prefix: bool = True) -> str:
+    text = str(message)
+    if strip_prefix:
+        text = _strip_log_tags(text)
+    return _clean_terminal_output(text)
+
+
+def append_chat_message(
+    run: RunRecord,
+    *,
+    role: str,
+    kind: str,
+    content: str,
+    step: Optional[Dict[str, str]] = None,
+    sql: Optional[Dict[str, str]] = None,
+    ts: Optional[str] = None,
+) -> Dict[str, Any]:
+    timestamp = ts or now_iso()
+    cleaned_content = _sanitize_content(content)
+    message: Dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "ts": timestamp,
+        "role": role,
+        "kind": kind,
+        "content": cleaned_content,
+    }
+
+    if step:
+        message["step"] = step
+
+    if sql:
+        cleaned_sql = {
+            key: _sanitize_content(value, strip_prefix=False)
+            for key, value in sql.items()
+            if isinstance(value, str) and _sanitize_content(value, strip_prefix=False)
+        }
+        if cleaned_sql:
+            message["sql"] = cleaned_sql
+
+    with RUN_LOCK:
+        run.messages.append(message)
+        run.updatedAt = timestamp
+        persist_runs_locked()
+    append_event(run, "chat:message", message)
+    return message
+
+
 def format_activity_log_entry(entry: Dict[str, Any]) -> str:
     message = entry.get("message") or ""
     header = str(message).strip()
@@ -322,7 +395,7 @@ def update_step(run: RunRecord, step_id: str, status: str) -> None:
                 return
 
 
-def add_log(run: RunRecord, message: str) -> None:
+def add_log(run: RunRecord, message: str, step_id: Optional[str] = None) -> None:
     line = str(message).strip()
     if not line:
         return
@@ -330,6 +403,18 @@ def add_log(run: RunRecord, message: str) -> None:
         run.logs.append(line)
         persist_runs_locked()
     append_event(run, "log", {"message": line})
+    resolved_step_id = step_id if step_id in STEP_LABELS else None
+    append_chat_message(
+        run,
+        role="agent",
+        kind="thinking" if resolved_step_id in THINKING_STEP_IDS else "log",
+        content=line,
+        step=(
+            {"id": resolved_step_id, "label": STEP_LABELS[resolved_step_id]}
+            if resolved_step_id
+            else None
+        ),
+    )
 
 
 def set_run_status(run: RunRecord, status: str, error: Optional[str] = None) -> None:
@@ -354,12 +439,26 @@ def run_node(run: RunRecord, run_id: str, state: MigrationContext, step_id: str,
     ensure_not_canceled(run_id)
     update_step(run, step_id, "running")
     append_event(run, "step:started", {"runId": run_id, "stepId": step_id, "label": STEP_LABELS[step_id]})
+    append_chat_message(
+        run,
+        role="system",
+        kind="step_started",
+        content=f"Starting: {STEP_LABELS[step_id]}",
+        step={"id": step_id, "label": STEP_LABELS[step_id]},
+    )
     state = node_fn(state)
     if state.current_stage == MigrationState.ERROR:
         update_step(run, step_id, "failed")
         raise RuntimeError(state.errors[-1] if state.errors else f"Step failed: {step_id}")
     update_step(run, step_id, "completed")
     append_event(run, "step:completed", {"runId": run_id, "stepId": step_id, "label": STEP_LABELS[step_id]})
+    append_chat_message(
+        run,
+        role="system",
+        kind="step_completed",
+        content=f"Completed: {STEP_LABELS[step_id]}",
+        step={"id": step_id, "label": STEP_LABELS[step_id]},
+    )
     return state
 
 
@@ -408,10 +507,18 @@ def execute_run_sync(run_id: str) -> None:
     try:
         set_run_status(run, "running")
         append_event(run, "run:started", {"runId": run_id})
+        append_chat_message(
+            run,
+            role="system",
+            kind="run_status",
+            content="Migration started.",
+        )
         def activity_log_sink(entry: Dict[str, Any]) -> None:
             formatted = format_activity_log_entry(entry)
             if formatted:
-                add_log(run, formatted)
+                stage = entry.get("stage")
+                step_id = stage if isinstance(stage, str) and stage in STEP_LABELS else None
+                add_log(run, formatted, step_id=step_id)
 
         context = MigrationContext(
             project_name=run.projectName,
@@ -478,6 +585,26 @@ def execute_run_sync(run_id: str) -> None:
                             "outputPreview": statement_entry.get("output_preview", []),
                         },
                     )
+                    statement_index = statement_entry.get("statement_index")
+                    label = f"Stmt {int(statement_index) + 1}" if isinstance(statement_index, int) else "Stmt ?"
+                    output_preview = statement_entry.get("output_preview", [])
+                    output_text = ""
+                    if isinstance(output_preview, list) and output_preview:
+                        try:
+                            output_text = json.dumps(output_preview, ensure_ascii=False, default=str, indent=2)
+                        except Exception:
+                            output_text = str(output_preview)
+                    append_chat_message(
+                        run,
+                        role="agent",
+                        kind="sql_statement",
+                        content=label,
+                        step={"id": "execute_sql", "label": STEP_LABELS["execute_sql"]},
+                        sql={
+                            "statement": str(statement_entry.get("statement") or ""),
+                            "output": output_text,
+                        },
+                    )
                 if file_entry.get("status") == "failed":
                     append_event(
                         run,
@@ -490,6 +617,24 @@ def execute_run_sync(run_id: str) -> None:
                             "errorMessage": file_entry.get("error_message"),
                             "failedStatement": file_entry.get("failed_statement"),
                             "failedStatementIndex": file_entry.get("failed_statement_index"),
+                        },
+                    )
+                    failed_statement_index = file_entry.get("failed_statement_index")
+                    label = (
+                        f"Stmt {int(failed_statement_index) + 1} ERROR"
+                        if isinstance(failed_statement_index, int)
+                        else "Stmt ? ERROR"
+                    )
+                    append_chat_message(
+                        run,
+                        role="error",
+                        kind="sql_error",
+                        content=label,
+                        step={"id": "execute_sql", "label": STEP_LABELS["execute_sql"]},
+                        sql={
+                            "error": str(file_entry.get("error_message") or ""),
+                            "failedStatement": str(file_entry.get("failed_statement") or ""),
+                            "output": f"Error type: {str(file_entry.get('error_type') or 'execution_error')}",
                         },
                     )
 
@@ -561,12 +706,24 @@ def execute_run_sync(run_id: str) -> None:
         attach_artifacts(run, context)
         set_run_status(run, "completed")
         append_event(run, "run:completed", {"runId": run_id})
+        append_chat_message(
+            run,
+            role="system",
+            kind="run_status",
+            content="Migration completed.",
+        )
     except Exception as exc:
         message = str(exc)
         canceled = message == "Run canceled"
         status = "canceled" if canceled else "failed"
         set_run_status(run, status, message)
         append_event(run, "run:failed", {"runId": run_id, "reason": message})
+        append_chat_message(
+            run,
+            role="error",
+            kind="run_status",
+            content=message or "Run failed",
+        )
     finally:
         with RUN_LOCK:
             if PROJECT_LOCKS.get(run.projectId) == run_id:

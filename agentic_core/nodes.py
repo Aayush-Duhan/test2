@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, List
+import time
 
 from .state import MigrationContext, MigrationState
 from .report_memory import build_report_context_memory, load_ignored_report_codes
@@ -31,10 +32,32 @@ def _decode_cli_stream(data: bytes) -> str:
     return data.decode("utf-8", errors="replace").strip()
 
 
-def _run_scai_command(cmd: List[str], cwd: str) -> tuple[int, str, str]:
-    """Run a CLI command and return decoded stdout/stderr."""
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=False)
-    return result.returncode, _decode_cli_stream(result.stdout), _decode_cli_stream(result.stderr)
+def _run_scai_command(cmd: List[str], cwd: str, max_retries: int = 4) -> tuple[int, str, str]:
+    """Run a CLI command and return decoded stdout/stderr, with retries for license issues."""
+    for attempt in range(1, max_retries + 1):
+        logger.debug(f"[SCAI CMD] Executing attempt {attempt}/{max_retries}: {' '.join(cmd)} in {cwd}")
+        
+        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=False)
+        stdout_str = _decode_cli_stream(result.stdout)
+        stderr_str = _decode_cli_stream(result.stderr)
+        
+        # Check for license issues or other random failures that might warrant a retry
+        output_lower = stdout_str.lower() + stderr_str.lower()
+        if result.returncode != 0 and ("license" in output_lower or "unauthorized" in output_lower or "unauthenticated" in output_lower):
+            logger.warning(f"[SCAI CMD] License/Auth issue detected on attempt {attempt}: \nSTDOUT: {stdout_str}\nSTDERR: {stderr_str}")
+            if attempt < max_retries:
+                logger.info(f"[SCAI CMD] Retrying command in 2 seconds (attempt {attempt+1}/{max_retries})...")
+                time.sleep(2)
+                continue
+                
+        # Also print detailed logs to help debug if it fails for other reasons
+        logger.debug(f"[SCAI CMD] Attempt {attempt} completed with code {result.returncode}.")
+        if result.returncode != 0:
+            logger.error(f"[SCAI CMD] Command failed with code {result.returncode}.\nSTDOUT: {stdout_str}\nSTDERR: {stderr_str}")
+            
+        return result.returncode, stdout_str, stderr_str
+        
+    return result.returncode, stdout_str, stderr_str
 
 
 def process_sql_with_pandas_replace(*args, **kwargs):

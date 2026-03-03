@@ -323,16 +323,15 @@ function NodeLogTimeline({
   const workflow = tasks[0];
   const subtasks = workflow?.subtasks ?? [];
 
-  const stepStatusByTitle = new Map(subtasks.map((step) => [step.title.toLowerCase(), step.status]));
-
-  const hasMarkerMessages = React.useMemo(
-    () => messages.some((m) => parseStepMarker(sanitizeMessageContent(m.content), "Starting")),
+  const stepStatusById = new Map(subtasks.map((step) => [step.id, step.status]));
+  const hasStepMessages = React.useMemo(
+    () => messages.some((m) => m.kind === "step_started" || m.kind === "step_completed"),
     [messages],
   );
 
   return (
     <div className="space-y-3">
-      {!hasMarkerMessages &&
+      {!hasStepMessages &&
         subtasks
           .filter((step) => step.status !== "pending")
           .map((step) => (
@@ -340,16 +339,19 @@ function NodeLogTimeline({
           ))}
 
       {messages.map((message) => {
-        const text = sanitizeMessageContent(message.content);
-        const started = parseStepMarker(text, "Starting");
-
-        if (started) {
-          const status = stepStatusByTitle.get(started.toLowerCase());
-          return <StepCheckpointCard key={message.id} title={started} status={status} runStatus={runStatus} />;
+        if (message.kind === "step_started" || message.kind === "step_completed") {
+          const title = message.step?.label ?? sanitizeMessageContent(message.content);
+          const statusFromTasks = message.step?.id ? stepStatusById.get(message.step.id) : undefined;
+          const fallbackStatus = message.kind === "step_completed" ? "completed" : "in-progress";
+          return (
+            <StepCheckpointCard
+              key={message.id}
+              title={title}
+              status={statusFromTasks ?? fallbackStatus}
+              runStatus={runStatus}
+            />
+          );
         }
-
-        const completed = parseStepMarker(text, "Completed");
-        if (completed) return null;
 
         return <ChatBubble key={message.id} message={message} />;
       })}
@@ -387,13 +389,6 @@ function StepCheckpointCard({
     </div>
   );
 }
-
-
-function parseStepMarker(text: string, marker: "Starting" | "Completed"): string | null {
-  const match = text.match(new RegExp(`^${marker}:\\s*(.+?)\\.?$`, "i"));
-  return match?.[1]?.trim() || null;
-}
-
 function ChatBubble({ message: m }: { message: ChatMessage }) {
   const isUser = m.role === "user";
   const isSystem = m.role === "system";
@@ -487,27 +482,9 @@ function buildPlainMessageBody(message: ChatMessage): string {
 }
 
 function cleanTerminalArtifacts(message: string): string {
-  const ansiStripped = message.replace(
-    // Strip ANSI escape codes from terminal streams.
-    /\u001b\[[0-?]*[ -/]*[@-~]/g,
-    "",
-  );
-
-  const cleaned = ansiStripped
-    .split(/\r?\n/)
-    .map((line) =>
-      line
-        // Box-drawing + mojibake characters often emitted by Windows terminal codepages.
-        .replace(/[\u2500-\u257f\u2580-\u259f]/g, " ")
-        .replace(/[À-ÿ]/g, " ")
-        .replace(/[=]{3,}/g, " ")
-        .replace(/[?]{5,}/g, " ")
-        .replace(/\s{2,}/g, " ")
-        .trim(),
-    )
-    .filter((line) => line.length > 0)
-    .filter((line) => !/^[=\-_*~.#|:+`^]+$/.test(line))
-    .join("\n");
-
-  return cleaned;
+  return message
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\u0000/g, "")
+    .trim();
 }
+

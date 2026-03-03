@@ -35,7 +35,7 @@ export function sanitizeMessageContent(content: string): string {
 export function makeMessage(
   role: ChatMessageRole,
   content: string,
-  kind: ChatMessageKind = "text",
+  kind: ChatMessageKind = "log",
   sql?: ChatSqlDetails,
 ): ChatMessage {
   return {
