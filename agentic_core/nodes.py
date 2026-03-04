@@ -335,6 +335,17 @@ def apply_schema_mapping_node(state: MigrationContext) -> MigrationContext:
 
     try:
         source_dir = os.path.join(state.project_path, "source")
+        mapping_path = (state.mapping_csv_path or "").strip()
+
+        if not mapping_path:
+            msg = "No schema mapping file provided; skipping schema mapping step."
+            logger.info(msg)
+            log_event(state, "info", msg)
+            state.current_stage = MigrationState.APPLY_SCHEMA_MAPPING
+            state.updated_at = datetime.now()
+            state.schema_mapped_code = read_sql_files(source_dir)
+            return state
+
         mapped_dir = os.path.join(state.project_path, "source_mapped")
         os.makedirs(mapped_dir, exist_ok=True)
 
@@ -345,7 +356,7 @@ def apply_schema_mapping_node(state: MigrationContext) -> MigrationContext:
             log_event(state, "info", f"Schema mapping: {msg}")
 
         process_sql_with_pandas_replace(
-            csv_file_path=state.mapping_csv_path,
+            csv_file_path=mapping_path,
             sql_file_path=source_dir,
             output_dir=mapped_dir,
             logg=log_callback

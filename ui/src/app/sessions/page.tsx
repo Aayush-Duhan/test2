@@ -398,8 +398,8 @@ export default function SessionsPage() {
   const startRun = async (pid?: string, sid?: string, scid?: string, lang?: string) => {
     const activePid = pid ?? projectId;
     const activeSid = sid ?? sourceId;
-    const activeScid = scid ?? schemaId;
-    if (!activePid || !activeSid || !activeScid) return;
+    const activeScid = scid ?? schemaId ?? undefined;
+    if (!activePid || !activeSid) return;
 
     setIsBusy(true);
     setError(null);
@@ -420,7 +420,12 @@ export default function SessionsPage() {
         sourceLanguage: lang ?? sourceLanguage,
       }),
     });
-    if (!res.ok) { setError("Failed to start run"); setIsBusy(false); return; }
+    if (!res.ok) {
+      const payload = await res.json().catch(() => ({}));
+      setError(typeof payload?.error === "string" ? payload.error : "Failed to start run");
+      setIsBusy(false);
+      return;
+    }
 
     const data = await res.json();
     setRunId(data.runId);
@@ -548,11 +553,8 @@ export default function SessionsPage() {
       const uploadedSourceId = sourceFileToUpload ? (await uploadSource(data.projectId, sourceFileToUpload)) ?? null : sourceId;
       const uploadedSchemaId = mappingFileToUpload ? (await uploadSchema(data.projectId, mappingFileToUpload)) ?? null : schemaId;
       
-      if (uploadedSourceId && uploadedSchemaId) {
-        await startRun(data.projectId, uploadedSourceId, uploadedSchemaId, wizardLanguage);
-      } else if (uploadedSourceId) {
-        // Schema is optional, proceed without it
-        await startRun(data.projectId, uploadedSourceId, uploadedSchemaId ?? "", wizardLanguage);
+      if (uploadedSourceId) {
+        await startRun(data.projectId, uploadedSourceId, uploadedSchemaId ?? undefined, wizardLanguage);
       } else {
         setError("Uploads incomplete. Please retry attaching files.");
       }

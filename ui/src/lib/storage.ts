@@ -1,5 +1,6 @@
 import { promises as fs } from "fs";
 import path from "path";
+import { getSqliteDb } from "./sqlite";
 
 export interface ProjectRecord {
   projectId: string;
@@ -27,10 +28,6 @@ export interface SchemaRecord {
 const dataDir = path.join(process.cwd(), "data");
 const uploadsDir = path.join(process.cwd(), "uploads");
 const outputsDir = path.join(process.cwd(), "outputs");
-const projectsPath = path.join(dataDir, "projects.json");
-const sourcesPath = path.join(dataDir, "sources.json");
-const schemasPath = path.join(dataDir, "schemas.json");
-const runsPath = path.join(dataDir, "runs.json");
 
 async function ensureDir(target: string) {
   await fs.mkdir(target, { recursive: true });
@@ -40,64 +37,136 @@ export async function ensureStorage() {
   await ensureDir(dataDir);
   await ensureDir(uploadsDir);
   await ensureDir(outputsDir);
-}
-
-async function readJson<T>(file: string, fallback: T): Promise<T> {
-  try {
-    const raw = await fs.readFile(file, "utf-8");
-    return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
-  }
-}
-
-async function writeJson<T>(file: string, payload: T) {
-  await ensureDir(path.dirname(file));
-  await fs.writeFile(file, JSON.stringify(payload, null, 2), "utf-8");
+  getSqliteDb();
 }
 
 export async function saveProject(project: ProjectRecord) {
-  const data = await readJson<ProjectRecord[]>(projectsPath, []);
-  const next = data.filter((item) => item.projectId !== project.projectId);
-  next.push(project);
-  await writeJson(projectsPath, next);
+  const db = getSqliteDb();
+  db.prepare(
+    `
+      INSERT INTO projects(project_id, name, source_language, created_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(project_id) DO UPDATE SET
+        name = excluded.name,
+        source_language = excluded.source_language,
+        created_at = excluded.created_at
+    `
+  ).run(
+    project.projectId,
+    project.name,
+    project.sourceLanguage ?? null,
+    project.createdAt
+  );
 }
 
 export async function getProject(projectId: string): Promise<ProjectRecord | undefined> {
-  const data = await readJson<ProjectRecord[]>(projectsPath, []);
-  return data.find((item) => item.projectId === projectId);
+  const db = getSqliteDb();
+  const row = db
+    .prepare(
+      `
+        SELECT project_id, name, source_language, created_at
+        FROM projects
+        WHERE project_id = ?
+      `
+    )
+    .get(projectId) as
+    | { project_id: string; name: string; source_language: string | null; created_at: string }
+    | undefined;
+  if (!row) return undefined;
+  return {
+    projectId: row.project_id,
+    name: row.name,
+    sourceLanguage: row.source_language ?? undefined,
+    createdAt: row.created_at,
+  };
 }
 
 export async function saveSource(source: SourceRecord) {
-  const data = await readJson<SourceRecord[]>(sourcesPath, []);
-  const next = data.filter((item) => item.sourceId !== source.sourceId);
-  next.push(source);
-  await writeJson(sourcesPath, next);
+  const db = getSqliteDb();
+  db.prepare(
+    `
+      INSERT INTO sources(source_id, project_id, filename, filepath, created_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(source_id) DO UPDATE SET
+        project_id = excluded.project_id,
+        filename = excluded.filename,
+        filepath = excluded.filepath,
+        created_at = excluded.created_at
+    `
+  ).run(source.sourceId, source.projectId, source.filename, source.filepath, source.createdAt);
 }
 
 export async function getSource(sourceId: string): Promise<SourceRecord | undefined> {
-  const data = await readJson<SourceRecord[]>(sourcesPath, []);
-  return data.find((item) => item.sourceId === sourceId);
+  const db = getSqliteDb();
+  const row = db
+    .prepare(
+      `
+        SELECT source_id, project_id, filename, filepath, created_at
+        FROM sources
+        WHERE source_id = ?
+      `
+    )
+    .get(sourceId) as
+    | {
+        source_id: string;
+        project_id: string;
+        filename: string;
+        filepath: string;
+        created_at: string;
+      }
+    | undefined;
+  if (!row) return undefined;
+  return {
+    sourceId: row.source_id,
+    projectId: row.project_id,
+    filename: row.filename,
+    filepath: row.filepath,
+    createdAt: row.created_at,
+  };
 }
 
 export async function saveSchema(schema: SchemaRecord) {
-  const data = await readJson<SchemaRecord[]>(schemasPath, []);
-  const next = data.filter((item) => item.schemaId !== schema.schemaId);
-  next.push(schema);
-  await writeJson(schemasPath, next);
+  const db = getSqliteDb();
+  db.prepare(
+    `
+      INSERT INTO schemas(schema_id, project_id, filename, filepath, created_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(schema_id) DO UPDATE SET
+        project_id = excluded.project_id,
+        filename = excluded.filename,
+        filepath = excluded.filepath,
+        created_at = excluded.created_at
+    `
+  ).run(schema.schemaId, schema.projectId, schema.filename, schema.filepath, schema.createdAt);
 }
 
 export async function getSchema(schemaId: string): Promise<SchemaRecord | undefined> {
-  const data = await readJson<SchemaRecord[]>(schemasPath, []);
-  return data.find((item) => item.schemaId === schemaId);
-}
-
-export async function saveRuns(payload: unknown) {
-  await writeJson(runsPath, payload);
-}
-
-export async function loadRuns<T>(fallback: T): Promise<T> {
-  return readJson(runsPath, fallback);
+  const db = getSqliteDb();
+  const row = db
+    .prepare(
+      `
+        SELECT schema_id, project_id, filename, filepath, created_at
+        FROM schemas
+        WHERE schema_id = ?
+      `
+    )
+    .get(schemaId) as
+    | {
+        schema_id: string;
+        project_id: string;
+        filename: string;
+        filepath: string;
+        created_at: string;
+      }
+    | undefined;
+  if (!row) return undefined;
+  return {
+    schemaId: row.schema_id,
+    projectId: row.project_id,
+    filename: row.filename,
+    filepath: row.filepath,
+    createdAt: row.created_at,
+  };
 }
 
 export async function getUploadDir(projectId: string) {

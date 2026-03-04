@@ -13,8 +13,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from agentic_core.decision import should_continue, should_continue_after_execute
@@ -30,22 +31,22 @@ from agentic_core.nodes import (
     validate_node,
 )
 from agentic_core.state import MigrationContext, MigrationState
+from python_execution_service import sqlite_store
 
 
 EXECUTION_TOKEN = os.getenv("EXECUTION_TOKEN", "local-dev-token")
 OUTPUT_ROOT = Path(os.getenv("PYTHON_EXEC_OUTPUT_ROOT", "outputs")).resolve()
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-RUN_INDEX_PATH = OUTPUT_ROOT / "run_index.json"
 
 
 class StartRunRequest(BaseModel):
     projectId: str
     projectName: str
     sourceId: str
-    schemaId: str
+    schemaId: Optional[str] = None
     sourceLanguage: str = "teradata"
     sourcePath: str
-    schemaPath: str
+    schemaPath: Optional[str] = None
     sfAccount: Optional[str] = None
     sfUser: Optional[str] = None
     sfRole: Optional[str] = None
@@ -144,6 +145,19 @@ logger = logging.getLogger(__name__)
 THINKING_STEP_IDS = {"self_heal", "convert_code", "validate"}
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    if request.url.path == "/v1/runs/start":
+        body_bytes = await request.body()
+        body_text = body_bytes.decode("utf-8", errors="replace")
+        logger.error(
+            "Validation error on /v1/runs/start. body=%s errors=%s",
+            body_text,
+            exc.errors(),
+        )
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
+
 def now_iso() -> str:
     return datetime.utcnow().isoformat()
 
@@ -194,41 +208,18 @@ def _deserialize_run_record(payload: Dict[str, Any]) -> RunRecord:
 
 
 def persist_runs_locked() -> None:
-    snapshot = [_serialize_run_record(run) for run in RUNS.values()]
-    RUN_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = RUN_INDEX_PATH.with_name(
-        f"{RUN_INDEX_PATH.stem}.{os.getpid()}.{threading.get_ident()}.tmp"
-    )
-    try:
-        with temp_path.open("w", encoding="utf-8") as handle:
-            json.dump(snapshot, handle, indent=2, default=str)
-
-        for attempt in range(6):
-            try:
-                os.replace(temp_path, RUN_INDEX_PATH)
-                return
-            except PermissionError:
-                if attempt == 5:
-                    raise
-                time.sleep(0.05 * (attempt + 1))
-    except Exception as exc:
-        logger.warning("Failed to persist run index: %s", exc)
-    finally:
+    for run in RUNS.values():
         try:
-            if temp_path.exists():
-                temp_path.unlink()
-        except Exception:
-            pass
+            sqlite_store.save_run_snapshot(_serialize_run_record(run))
+        except Exception as exc:
+            logger.warning("Failed to persist run %s: %s", run.runId, exc)
 
 
 def load_persisted_runs() -> None:
-    if not RUN_INDEX_PATH.exists():
-        return
     try:
-        payload = json.loads(RUN_INDEX_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return
-    if not isinstance(payload, list):
+        payload = sqlite_store.list_runs()
+    except Exception as exc:
+        logger.warning("Failed to load persisted runs from sqlite: %s", exc)
         return
     now = now_iso()
     with RUN_LOCK:
@@ -255,6 +246,7 @@ def require_auth(x_execution_token: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+sqlite_store.init_schema()
 load_persisted_runs()
 
 
@@ -264,6 +256,10 @@ def append_event(run: RunRecord, event_type: str, payload: Dict[str, Any]) -> No
         run.events.append(event)
         run.updatedAt = event["timestamp"]
         persist_runs_locked()
+    try:
+        sqlite_store.append_run_event(run.runId, event_type, payload, event["timestamp"])
+    except Exception as exc:
+        logger.warning("Failed to append event for run %s: %s", run.runId, exc)
     events_file = Path(run.outputDir) / "events.jsonl"
     events_file.parent.mkdir(parents=True, exist_ok=True)
     with events_file.open("a", encoding="utf-8") as handle:
@@ -335,6 +331,10 @@ def append_chat_message(
         run.messages.append(message)
         run.updatedAt = timestamp
         persist_runs_locked()
+    try:
+        sqlite_store.append_run_message(run.runId, message)
+    except Exception as exc:
+        logger.warning("Failed to append message for run %s: %s", run.runId, exc)
     append_event(run, "chat:message", message)
     return message
 
@@ -394,9 +394,15 @@ def add_log(run: RunRecord, message: str, step_id: Optional[str] = None) -> None
     line = _sanitize_content(str(message), strip_prefix=False).strip()
     if not line:
         return
+    created_at = now_iso()
     with RUN_LOCK:
         run.logs.append(line)
+        run.updatedAt = created_at
         persist_runs_locked()
+    try:
+        sqlite_store.append_run_log(run.runId, line, created_at)
+    except Exception as exc:
+        logger.warning("Failed to append log for run %s: %s", run.runId, exc)
     append_event(run, "log", {"message": line})
     resolved_step_id = step_id if step_id in STEP_LABELS else None
     append_chat_message(
@@ -758,7 +764,7 @@ def _request_from_run(existing: RunRecord) -> StartRunRequest:
 def _start_run_record(request: StartRunRequest, resume_config: Optional[ResumeRunConfig] = None) -> StartRunResponse:
     if not Path(request.sourcePath).exists():
         raise HTTPException(status_code=404, detail="Source file path not found")
-    if not Path(request.schemaPath).exists():
+    if request.schemaPath and not Path(request.schemaPath).exists():
         raise HTTPException(status_code=404, detail="Schema file path not found")
 
     with RUN_LOCK:
@@ -791,10 +797,10 @@ def _start_run_record(request: StartRunRequest, resume_config: Optional[ResumeRu
             projectId=request.projectId,
             projectName=request.projectName,
             sourceId=request.sourceId,
-            schemaId=request.schemaId,
+            schemaId=request.schemaId or "",
             sourceLanguage=request.sourceLanguage,
             sourcePath=request.sourcePath,
-            schemaPath=request.schemaPath,
+            schemaPath=request.schemaPath or "",
             sfAccount=request.sfAccount,
             sfUser=request.sfUser,
             sfRole=request.sfRole,
@@ -958,7 +964,11 @@ async def resume_run(
 
 
 @app.get("/v1/runs/{run_id}/events")
-async def stream_events(run_id: str, x_execution_token: Optional[str] = Header(default=None)) -> StreamingResponse:
+async def stream_events(
+    run_id: str,
+    x_execution_token: Optional[str] = Header(default=None),
+    last_event_id: Optional[str] = Header(default=None),
+) -> StreamingResponse:
     require_auth(x_execution_token)
     with RUN_LOCK:
         if run_id not in RUNS:
@@ -966,6 +976,11 @@ async def stream_events(run_id: str, x_execution_token: Optional[str] = Header(d
 
     async def iterator():
         idx = 0
+        if last_event_id is not None:
+            try:
+                idx = max(0, int(last_event_id) + 1)
+            except ValueError:
+                idx = 0
         heartbeat_at = time.time()
         while True:
             with RUN_LOCK:
@@ -976,10 +991,12 @@ async def stream_events(run_id: str, x_execution_token: Optional[str] = Header(d
                 status = run.status
                 total_events = len(run.events)
             for event in events:
-                idx += 1
+                event_id = idx
                 yield f"event: {event['type']}\n".encode("utf-8")
+                yield f"id: {event_id}\n".encode("utf-8")
                 payload = event.get("payload", {})
                 yield f"data: {json.dumps(payload)}\n\n".encode("utf-8")
+                idx += 1
             now = time.time()
             if now - heartbeat_at >= 20:
                 heartbeat_at = now
