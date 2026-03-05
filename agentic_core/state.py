@@ -73,6 +73,10 @@ class MigrationContext:
     max_retries: int = 3
 
     decision_history: List[Dict] = field(default_factory=list)
+    orchestrator_history: List[Dict[str, Any]] = field(default_factory=list)
+    last_step_error: str = ""
+    last_step_success: bool = False
+    node_retry_counts: Dict[str, int] = field(default_factory=dict)
     requires_human_intervention: bool = False
     human_intervention_reason: str = ""
     requires_ddl_upload: bool = False

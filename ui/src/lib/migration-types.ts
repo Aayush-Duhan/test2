@@ -39,6 +39,8 @@ export type RunEventType =
   | "run:failed"
   | "step:started"
   | "step:completed"
+  | "step:failed"
+  | "orchestrator:decision"
   | "log"
   | "execute_sql:statement"
   | "execute_sql:error";

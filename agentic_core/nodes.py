@@ -9,9 +9,10 @@ import os
 import shutil
 import subprocess
 import logging
+import threading
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 import time
 
 from .state import MigrationContext, MigrationState
@@ -20,30 +21,108 @@ from .report_memory import build_report_context_memory, load_ignored_report_code
 # Configure logging
 logger = logging.getLogger(__name__)
 
-def _decode_cli_stream(data: bytes) -> str:
+def _decode_cli_stream(data: bytes, *, strip: bool = True) -> str:
     """Decode CLI bytes robustly across Windows code pages."""
     if not data:
         return ""
     for encoding in ("utf-8", "utf-8-sig", "cp437", "cp1252", "latin-1"):
         try:
-            return data.decode(encoding).strip()
+            decoded = data.decode(encoding)
+            return decoded.strip() if strip else decoded
         except Exception:
             continue
-    return data.decode("utf-8", errors="replace").strip()
+    fallback = data.decode("utf-8", errors="replace")
+    return fallback.strip() if strip else fallback
 
 
-def _run_scai_command(cmd: List[str], cwd: str, max_retries: int = 4) -> tuple[int, str, str]:
-    """Run a CLI command and return decoded stdout/stderr, with retries for license issues."""
+def _run_scai_command(
+    cmd: List[str],
+    cwd: str,
+    max_retries: int = 4,
+    on_command: Optional[Callable[[Dict[str, Any]], None]] = None,
+    on_line: Optional[Callable[[str, str], None]] = None,
+) -> tuple[int, str, str]:
+    """Run a CLI command with streamed stdout/stderr callbacks and retry support."""
+    last_return_code = 1
+    last_stdout_str = ""
+    last_stderr_str = ""
+
+    def emit_command(payload: Dict[str, Any]) -> None:
+        if callable(on_command):
+            try:
+                on_command(payload)
+            except Exception:
+                pass
+
+    def emit_line(stream: str, text: str) -> None:
+        if callable(on_line):
+            try:
+                on_line(stream, text)
+            except Exception:
+                pass
+
     for attempt in range(1, max_retries + 1):
-        logger.debug(f"[SCAI CMD] Executing attempt {attempt}/{max_retries}: {' '.join(cmd)} in {cwd}")
-        
-        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=False)
-        stdout_str = _decode_cli_stream(result.stdout)
-        stderr_str = _decode_cli_stream(result.stderr)
-        
+        command_str = " ".join(cmd)
+        logger.debug(f"[SCAI CMD] Executing attempt {attempt}/{max_retries}: {command_str} in {cwd}")
+        emit_command({"command": command_str, "cwd": cwd, "attempt": attempt})
+
+        process = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            text=False,
+            bufsize=0,
+        )
+
+        stdout_lines: List[str] = []
+        stderr_lines: List[str] = []
+
+        def reader(stream_name: str, stream, buffer: List[str]) -> None:
+            if stream is None:
+                return
+            try:
+                while True:
+                    chunk = stream.readline()
+                    if not chunk:
+                        break
+                    line = _decode_cli_stream(chunk, strip=False).rstrip("\r\n")
+                    if not line:
+                        continue
+                    buffer.append(line)
+                    emit_line(stream_name, line)
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+        stdout_thread = threading.Thread(
+            target=reader,
+            args=("stdout", process.stdout, stdout_lines),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=reader,
+            args=("stderr", process.stderr, stderr_lines),
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        return_code = process.wait()
+        stdout_thread.join()
+        stderr_thread.join()
+
+        stdout_str = "\n".join(stdout_lines).strip()
+        stderr_str = "\n".join(stderr_lines).strip()
+        last_return_code = return_code
+        last_stdout_str = stdout_str
+        last_stderr_str = stderr_str
+
         # Check for license issues or other random failures that might warrant a retry
         output_lower = stdout_str.lower() + stderr_str.lower()
-        if result.returncode != 0 and ("license" in output_lower or "unauthorized" in output_lower or "unauthenticated" in output_lower):
+        if return_code != 0 and ("license" in output_lower or "unauthorized" in output_lower or "unauthenticated" in output_lower):
             logger.warning(f"[SCAI CMD] License/Auth issue detected on attempt {attempt}: \nSTDOUT: {stdout_str}\nSTDERR: {stderr_str}")
             if attempt < max_retries:
                 logger.info(f"[SCAI CMD] Retrying command in 2 seconds (attempt {attempt+1}/{max_retries})...")
@@ -51,13 +130,48 @@ def _run_scai_command(cmd: List[str], cwd: str, max_retries: int = 4) -> tuple[i
                 continue
                 
         # Also print detailed logs to help debug if it fails for other reasons
-        logger.debug(f"[SCAI CMD] Attempt {attempt} completed with code {result.returncode}.")
-        if result.returncode != 0:
-            logger.error(f"[SCAI CMD] Command failed with code {result.returncode}.\nSTDOUT: {stdout_str}\nSTDERR: {stderr_str}")
+        logger.debug(f"[SCAI CMD] Attempt {attempt} completed with code {return_code}.")
+        if return_code != 0:
+            logger.error(f"[SCAI CMD] Command failed with code {return_code}.\nSTDOUT: {stdout_str}\nSTDERR: {stderr_str}")
             
-        return result.returncode, stdout_str, stderr_str
+        return return_code, stdout_str, stderr_str
         
-    return result.returncode, stdout_str, stderr_str
+    return last_return_code, last_stdout_str, last_stderr_str
+
+
+def _make_terminal_callbacks(state: MigrationContext, step_id: str) -> tuple[Callable[[Dict[str, Any]], None], Callable[[str, str], None]]:
+    def on_command(payload: Dict[str, Any]) -> None:
+        log_event(
+            state,
+            "info",
+            "terminal command",
+            {
+                "terminal": {
+                    "type": "command",
+                    "stepId": step_id,
+                    "command": payload.get("command", ""),
+                    "cwd": payload.get("cwd", ""),
+                    "attempt": payload.get("attempt"),
+                }
+            },
+        )
+
+    def on_line(stream: str, text: str) -> None:
+        log_event(
+            state,
+            "info",
+            "terminal line",
+            {
+                "terminal": {
+                    "type": "line",
+                    "stepId": step_id,
+                    "stream": stream,
+                    "text": text,
+                }
+            },
+        )
+
+    return on_command, on_line
 
 
 def process_sql_with_pandas_replace(*args, **kwargs):
@@ -190,11 +304,13 @@ def init_project_node(state: MigrationContext) -> MigrationContext:
             "-n", state.project_name
         ]
 
-        return_code, stdout, stderr = _run_scai_command(cmd, project_path)
-        if stdout:
-            log_event(state, "info", "scai init output", {"stdout": stdout})
-        if stderr:
-            log_event(state, "warning", "scai init stderr", {"stderr": stderr})
+        on_command, on_line = _make_terminal_callbacks(state, "init_project")
+        return_code, stdout, stderr = _run_scai_command(
+            cmd,
+            project_path,
+            on_command=on_command,
+            on_line=on_line,
+        )
 
         if return_code != 0:
             error_detail = stderr or stdout or f"Exit code {return_code}"
@@ -277,11 +393,13 @@ def add_source_code_node(state: MigrationContext) -> MigrationContext:
             shutil.rmtree(source_dir_abs)
 
         cmd = ["scai", "code", "add", "-i", source_input_abs]
-        return_code, stdout, stderr = _run_scai_command(cmd, state.project_path)
-        if stdout:
-            log_event(state, "info", "scai code add output", {"stdout": stdout})
-        if stderr:
-            log_event(state, "warning", "scai code add stderr", {"stderr": stderr})
+        on_command, on_line = _make_terminal_callbacks(state, "add_source_code")
+        return_code, stdout, stderr = _run_scai_command(
+            cmd,
+            state.project_path,
+            on_command=on_command,
+            on_line=on_line,
+        )
 
         if return_code != 0:
             error_detail = stderr or stdout or "Unknown error"
@@ -410,11 +528,13 @@ def convert_code_node(state: MigrationContext) -> MigrationContext:
 
     try:
         cmd = ["scai", "code", "convert"]
-        return_code, stdout, stderr = _run_scai_command(cmd, state.project_path)
-        if stdout:
-            log_event(state, "info", "scai code convert output", {"stdout": stdout})
-        if stderr:
-            log_event(state, "warning", "scai code convert stderr", {"stderr": stderr})
+        on_command, on_line = _make_terminal_callbacks(state, "convert_code")
+        return_code, stdout, stderr = _run_scai_command(
+            cmd,
+            state.project_path,
+            on_command=on_command,
+            on_line=on_line,
+        )
 
         if return_code != 0:
             error_detail = stderr or stdout or "Unknown error"

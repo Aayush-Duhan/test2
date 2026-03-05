@@ -333,6 +333,9 @@ function NodeLogTimeline({
           ))}
 
       {messages.map((message, index) => {
+        if (message.kind === "log" || message.kind === "thinking") {
+          return null;
+        }
         const renderKey = `${message.id}-${message.ts ?? "no-ts"}-${index}`;
 
         if (message.kind === "step_started" || message.kind === "step_completed") {

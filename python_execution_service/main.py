@@ -11,15 +11,13 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
-from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
-from agentic_core.decision import should_continue, should_continue_after_execute
 from agentic_core.nodes import (
     add_source_code_node,
     apply_schema_mapping_node,
@@ -30,6 +28,11 @@ from agentic_core.nodes import (
     init_project_node,
     self_heal_node,
     validate_node,
+)
+from agentic_core.orchestrator import (
+    OrchestratorDecision,
+    SnowflakeCortexOrchestrator,
+    build_decision_context,
 )
 from agentic_core.state import MigrationContext, MigrationState
 from python_execution_service import sqlite_store
@@ -92,6 +95,7 @@ class RunRecord:
     updatedAt: str
     steps: List[RunStep] = field(default_factory=list)
     logs: List[str] = field(default_factory=list)
+    terminalEvents: List[Dict[str, Any]] = field(default_factory=list)
     validationIssues: List[Dict[str, Any]] = field(default_factory=list)
     executionLog: List[Dict[str, Any]] = field(default_factory=list)
     executionErrors: List[Dict[str, Any]] = field(default_factory=list)
@@ -136,11 +140,43 @@ STEP_LABELS = {
 app = FastAPI(title="Python Execution Service", version="0.1.0")
 logger = logging.getLogger(__name__)
 THINKING_STEP_IDS = {"self_heal", "convert_code", "validate"}
+ORCHESTRATOR_CONFIDENCE_THRESHOLD = 0.75
+ORCHESTRATOR_TIMEOUT_SECONDS = 15
+ORCHESTRATOR_RETRIES = 1
+ORCHESTRATOR_HUMAN_REVIEW_STEP = "human_review"
+WORKFLOW_END_STEP = "END"
+
+SUCCESS_TRANSITIONS: Dict[str, List[str]] = {
+    "init_project": ["add_source_code"],
+    "add_source_code": ["apply_schema_mapping"],
+    "apply_schema_mapping": ["convert_code"],
+    "convert_code": ["execute_sql"],
+    "execute_sql": ["validate", "self_heal", "human_review"],
+    "self_heal": ["execute_sql"],
+    "validate": ["finalize", "human_review"],
+    "human_review": [WORKFLOW_END_STEP],
+    "finalize": [WORKFLOW_END_STEP],
+}
+
+FAILURE_TRANSITIONS: Dict[str, List[str]] = {
+    "init_project": ["init_project", "human_review"],
+    "add_source_code": ["add_source_code", "human_review"],
+    "apply_schema_mapping": ["apply_schema_mapping", "human_review"],
+    "convert_code": ["convert_code", "human_review"],
+    "execute_sql": ["execute_sql", "human_review"],
+    "self_heal": ["execute_sql", "human_review"],
+    "validate": ["validate", "human_review"],
+    "human_review": [WORKFLOW_END_STEP],
+    "finalize": [WORKFLOW_END_STEP],
+}
 
 
-class WorkflowState(TypedDict):
+@dataclass
+class NodeExecutionResult:
+    step_id: str
+    success: bool
     context: MigrationContext
-
+    error: str = ""
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -186,6 +222,7 @@ def _deserialize_run_record(payload: Dict[str, Any]) -> RunRecord:
         updatedAt=payload.get("updatedAt", now_iso()),
         steps=steps,
         logs=payload.get("logs", []),
+        terminalEvents=payload.get("terminalEvents", []),
         validationIssues=payload.get("validationIssues", []),
         executionLog=payload.get("executionLog", []),
         executionErrors=payload.get("executionErrors", []),
@@ -335,6 +372,54 @@ def append_chat_message(
     return message
 
 
+def append_terminal_event(
+    run: RunRecord,
+    *,
+    event_type: str,
+    step_id: Optional[str] = None,
+    command: Optional[str] = None,
+    cwd: Optional[str] = None,
+    attempt: Optional[int] = None,
+    stream: Optional[str] = None,
+    text: Optional[str] = None,
+    ts: Optional[str] = None,
+) -> Dict[str, Any]:
+    if event_type not in {"terminal:command", "terminal:line"}:
+        raise ValueError(f"Unsupported terminal event type: {event_type}")
+
+    timestamp = ts or now_iso()
+    payload: Dict[str, Any] = {"type": event_type, "runId": run.runId, "ts": timestamp}
+
+    if isinstance(step_id, str) and step_id.strip():
+        payload["stepId"] = step_id.strip()
+
+    if event_type == "terminal:command":
+        command_text = _sanitize_content(command or "", strip_prefix=False).strip()
+        if not command_text:
+            raise ValueError("terminal:command requires command")
+        payload["command"] = command_text
+        if isinstance(cwd, str) and cwd.strip():
+            payload["cwd"] = cwd.strip()
+        if isinstance(attempt, int):
+            payload["attempt"] = attempt
+    else:
+        stream_name = str(stream or "stdout").strip().lower()
+        if stream_name not in {"stdout", "stderr"}:
+            stream_name = "stdout"
+        text_value = _sanitize_content(text or "", strip_prefix=False).strip()
+        if not text_value:
+            raise ValueError("terminal:line requires text")
+        payload["stream"] = stream_name
+        payload["text"] = text_value
+
+    with RUN_LOCK:
+        run.terminalEvents.append(payload)
+        run.updatedAt = timestamp
+        persist_runs_locked()
+    append_event(run, event_type, payload)
+    return payload
+
+
 def format_activity_log_entry(entry: Dict[str, Any]) -> str:
     message = entry.get("message") or ""
     header = str(message).strip()
@@ -369,6 +454,70 @@ def format_activity_log_entry(entry: Dict[str, Any]) -> str:
 
     body = stringify_value(data)
     return f"{header}\n{body}" if body else header
+
+
+def _extract_terminal_event_from_activity(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(entry, dict):
+        return None
+    data = entry.get("data")
+    if not isinstance(data, dict):
+        return None
+    terminal = data.get("terminal")
+    if not isinstance(terminal, dict):
+        return None
+
+    terminal_type = str(terminal.get("type") or "").strip().lower()
+    step_id = terminal.get("stepId")
+    resolved_step_id = step_id if isinstance(step_id, str) and step_id in STEP_LABELS else None
+    timestamp = str(entry.get("timestamp") or now_iso())
+
+    if terminal_type == "command":
+        command = terminal.get("command")
+        if not isinstance(command, str):
+            return None
+        attempt = terminal.get("attempt")
+        attempt_int = int(attempt) if isinstance(attempt, int) else None
+        return {
+            "event_type": "terminal:command",
+            "step_id": resolved_step_id,
+            "command": command,
+            "cwd": terminal.get("cwd") if isinstance(terminal.get("cwd"), str) else None,
+            "attempt": attempt_int,
+            "ts": timestamp,
+        }
+
+    if terminal_type == "line":
+        text = terminal.get("text")
+        if not isinstance(text, str):
+            return None
+        stream = terminal.get("stream")
+        stream_name = stream if isinstance(stream, str) else "stdout"
+        return {
+            "event_type": "terminal:line",
+            "step_id": resolved_step_id,
+            "stream": stream_name,
+            "text": text,
+            "ts": timestamp,
+        }
+
+    return None
+
+
+def route_activity_log_entry(run: RunRecord, entry: Dict[str, Any]) -> None:
+    terminal_payload = _extract_terminal_event_from_activity(entry)
+    if terminal_payload:
+        try:
+            append_terminal_event(run, **terminal_payload)
+        except Exception as exc:
+            logger.warning("Failed to append terminal event for run %s: %s", run.runId, exc)
+        return
+
+    formatted = format_activity_log_entry(entry)
+    if not formatted:
+        return
+    stage = entry.get("stage")
+    step_id = stage if isinstance(stage, str) and stage in STEP_LABELS else None
+    add_log(run, formatted, step_id=step_id)
 
 
 def update_step(run: RunRecord, step_id: str, status: str) -> None:
@@ -432,8 +581,7 @@ def ensure_not_canceled(run_id: str) -> None:
         raise RuntimeError("Run canceled")
 
 
-def run_node(run: RunRecord, run_id: str, state: MigrationContext, step_id: str, node_fn) -> MigrationContext:
-    ensure_not_canceled(run_id)
+def _emit_step_started(run: RunRecord, run_id: str, step_id: str) -> None:
     update_step(run, step_id, "running")
     append_event(run, "step:started", {"runId": run_id, "stepId": step_id, "label": STEP_LABELS[step_id]})
     append_chat_message(
@@ -443,10 +591,9 @@ def run_node(run: RunRecord, run_id: str, state: MigrationContext, step_id: str,
         content=f"Starting: {STEP_LABELS[step_id]}",
         step={"id": step_id, "label": STEP_LABELS[step_id]},
     )
-    state = node_fn(state)
-    if state.current_stage == MigrationState.ERROR:
-        update_step(run, step_id, "failed")
-        raise RuntimeError(state.errors[-1] if state.errors else f"Step failed: {step_id}")
+
+
+def _emit_step_completed(run: RunRecord, run_id: str, step_id: str) -> None:
     update_step(run, step_id, "completed")
     append_event(run, "step:completed", {"runId": run_id, "stepId": step_id, "label": STEP_LABELS[step_id]})
     append_chat_message(
@@ -456,7 +603,171 @@ def run_node(run: RunRecord, run_id: str, state: MigrationContext, step_id: str,
         content=f"Completed: {STEP_LABELS[step_id]}",
         step={"id": step_id, "label": STEP_LABELS[step_id]},
     )
-    return state
+
+
+def _emit_step_failed(run: RunRecord, run_id: str, step_id: str, reason: str) -> None:
+    update_step(run, step_id, "failed")
+    append_event(
+        run,
+        "step:failed",
+        {
+            "runId": run_id,
+            "stepId": step_id,
+            "label": STEP_LABELS[step_id],
+            "reason": reason,
+        },
+    )
+    append_chat_message(
+        run,
+        role="error",
+        kind="run_status",
+        content=f"Failed: {STEP_LABELS[step_id]} ({reason})",
+        step={"id": step_id, "label": STEP_LABELS[step_id]},
+    )
+
+
+def _get_allowed_transitions(step_id: str, *, success: bool) -> List[str]:
+    table = SUCCESS_TRANSITIONS if success else FAILURE_TRANSITIONS
+    candidates = table.get(step_id, [ORCHESTRATOR_HUMAN_REVIEW_STEP])
+    return [candidate for candidate in candidates if isinstance(candidate, str) and candidate]
+
+
+def _apply_transition_guardrails(
+    state: MigrationContext,
+    step_id: str,
+    candidates: List[str],
+) -> List[str]:
+    allowed = [item for item in candidates]
+
+    # DDL upload blocker always forces explicit pause for human review.
+    if state.requires_ddl_upload:
+        if ORCHESTRATOR_HUMAN_REVIEW_STEP in allowed:
+            return [ORCHESTRATOR_HUMAN_REVIEW_STEP]
+        return [WORKFLOW_END_STEP] if WORKFLOW_END_STEP in allowed else allowed[:1]
+
+    # Same-step retry is allowed at most once per node.
+    retry_counts = state.node_retry_counts if isinstance(state.node_retry_counts, dict) else {}
+    if retry_counts.get(step_id, 0) >= 1:
+        allowed = [candidate for candidate in allowed if candidate != step_id]
+
+    if not allowed:
+        if ORCHESTRATOR_HUMAN_REVIEW_STEP in candidates:
+            return [ORCHESTRATOR_HUMAN_REVIEW_STEP]
+        if WORKFLOW_END_STEP in candidates:
+            return [WORKFLOW_END_STEP]
+        return candidates[:1]
+    return allowed
+
+
+def _emit_orchestrator_decision(
+    run: RunRecord,
+    decision: OrchestratorDecision,
+    *,
+    resolved_step: str,
+    guarded_candidates: List[str],
+) -> None:
+    payload = decision.to_payload()
+    payload["resolved_step"] = resolved_step
+    payload["guarded_candidates"] = guarded_candidates
+    append_event(run, "orchestrator:decision", payload)
+
+
+def _resolve_next_step(
+    run: RunRecord,
+    state: MigrationContext,
+    step_id: str,
+    *,
+    success: bool,
+    orchestrator: SnowflakeCortexOrchestrator,
+) -> str:
+    allowed = _get_allowed_transitions(step_id, success=success)
+    guarded_candidates = _apply_transition_guardrails(state, step_id, allowed)
+    context = build_decision_context(state, step_id, guarded_candidates)
+    decision = orchestrator.decide(state, context)
+
+    resolved_step = decision.selected_step
+    if resolved_step not in guarded_candidates:
+        resolved_step = (
+            ORCHESTRATOR_HUMAN_REVIEW_STEP
+            if ORCHESTRATOR_HUMAN_REVIEW_STEP in guarded_candidates
+            else guarded_candidates[0]
+        )
+    elif decision.confidence < ORCHESTRATOR_CONFIDENCE_THRESHOLD:
+        resolved_step = (
+            ORCHESTRATOR_HUMAN_REVIEW_STEP
+            if ORCHESTRATOR_HUMAN_REVIEW_STEP in guarded_candidates
+            else guarded_candidates[0]
+        )
+
+    if state.requires_ddl_upload and ORCHESTRATOR_HUMAN_REVIEW_STEP in guarded_candidates:
+        resolved_step = ORCHESTRATOR_HUMAN_REVIEW_STEP
+
+    if decision.status != "ok":
+        resolved_step = (
+            ORCHESTRATOR_HUMAN_REVIEW_STEP
+            if ORCHESTRATOR_HUMAN_REVIEW_STEP in guarded_candidates
+            else guarded_candidates[0]
+        )
+
+    _emit_orchestrator_decision(
+        run,
+        decision,
+        resolved_step=resolved_step,
+        guarded_candidates=guarded_candidates,
+    )
+
+    state.orchestrator_history.append(
+        {
+            **decision.to_payload(),
+            "resolved_step": resolved_step,
+            "guarded_candidates": guarded_candidates,
+            "node_success": success,
+        }
+    )
+    return resolved_step
+
+
+def run_node_safe(
+    run: RunRecord,
+    run_id: str,
+    state: MigrationContext,
+    step_id: str,
+    node_fn: Callable[[MigrationContext], MigrationContext],
+    *,
+    success_log: Optional[str] = None,
+    post_hook: Optional[Callable[[MigrationContext], None]] = None,
+) -> NodeExecutionResult:
+    ensure_not_canceled(run_id)
+    _emit_step_started(run, run_id, step_id)
+    try:
+        updated = node_fn(state)
+    except Exception as exc:
+        if str(exc) == "Run canceled":
+            raise
+        message = str(exc) or f"Step failed: {step_id}"
+        state.last_step_success = False
+        state.last_step_error = message
+        state.current_stage = MigrationState.ERROR
+        if message not in state.errors:
+            state.errors.append(message)
+        _emit_step_failed(run, run_id, step_id, message)
+        return NodeExecutionResult(step_id=step_id, success=False, context=state, error=message)
+
+    if updated.current_stage == MigrationState.ERROR:
+        message = updated.errors[-1] if updated.errors else f"Step failed: {step_id}"
+        updated.last_step_success = False
+        updated.last_step_error = message
+        _emit_step_failed(run, run_id, step_id, message)
+        return NodeExecutionResult(step_id=step_id, success=False, context=updated, error=message)
+
+    _emit_step_completed(run, run_id, step_id)
+    if success_log:
+        add_log(run, success_log)
+    if callable(post_hook):
+        post_hook(updated)
+    updated.last_step_success = True
+    updated.last_step_error = ""
+    return NodeExecutionResult(step_id=step_id, success=True, context=updated)
 
 
 def execute_run_sync(run_id: str) -> None:
@@ -477,11 +788,7 @@ def execute_run_sync(run_id: str) -> None:
         )
 
         def activity_log_sink(entry: Dict[str, Any]) -> None:
-            formatted = format_activity_log_entry(entry)
-            if formatted:
-                stage = entry.get("stage")
-                step_id = stage if isinstance(stage, str) and stage in STEP_LABELS else None
-                add_log(run, formatted, step_id=step_id)
+            route_activity_log_entry(run, entry)
 
         context = MigrationContext(
             project_name=run.projectName,
@@ -618,112 +925,115 @@ def execute_run_sync(run_id: str) -> None:
             )
             add_log(run, f"Self-heal iteration {updated.self_heal_iteration} applied; re-running execute_sql.")
 
-        def wrap_node(step_id: str, node_fn, *, success_log: Optional[str] = None, post_hook=None):
-            def _wrapped(state_obj: WorkflowState) -> WorkflowState:
-                updated = run_node(run, run_id, state_obj["context"], step_id, node_fn)
-                if success_log:
-                    add_log(run, success_log)
-                if callable(post_hook):
-                    post_hook(updated)
-                return {"context": updated}
-            return _wrapped
-
-        def route_after_execute(state_obj: WorkflowState) -> str:
-            current = state_obj["context"]
-            decision = should_continue_after_execute(current)
-            if decision == "self_heal" and current.self_heal_iteration >= current.max_self_heal_iterations:
-                current.requires_human_intervention = True
-                current.human_intervention_reason = (
-                    f"Could not resolve execution errors after {current.max_self_heal_iterations} self-heal iteration(s)."
-                )
-                return "human_review"
-            if decision == "finalize":
-                return "validate"
-            return decision
-
-        def route_after_validate(state_obj: WorkflowState) -> str:
-            current = state_obj["context"]
-            decision = should_continue(current)
-            if decision == "finalize":
-                return "finalize"
-            if not current.human_intervention_reason:
-                current.human_intervention_reason = "Validation failed after execution"
-            return "human_review"
-
-        graph_builder = StateGraph(WorkflowState)
-        graph_builder.add_node("init_project", wrap_node("init_project", init_project_node, success_log="Project initialized."))
-        graph_builder.add_node("add_source_code", wrap_node("add_source_code", add_source_code_node, success_log="Source code added."))
-        graph_builder.add_node(
-            "apply_schema_mapping",
-            wrap_node("apply_schema_mapping", apply_schema_mapping_node, success_log="Schema mapping applied."),
-        )
-        graph_builder.add_node("convert_code", wrap_node("convert_code", convert_code_node, success_log="Code conversion complete."))
-        graph_builder.add_node(
-            "execute_sql",
-            wrap_node(
-                "execute_sql",
-                execute_sql_node,
-                success_log="Execute SQL stage completed.",
-                post_hook=lambda updated: (sync_execution_state(updated), emit_execute_events(updated)),
-            ),
-        )
-        graph_builder.add_node(
-            "self_heal",
-            wrap_node("self_heal", self_heal_node, post_hook=sync_self_heal_state),
-        )
-        graph_builder.add_node(
-            "validate",
-            wrap_node("validate", validate_node, post_hook=sync_validation_state),
-        )
-        graph_builder.add_node("human_review", wrap_node("human_review", human_review_node))
-        graph_builder.add_node("finalize", wrap_node("finalize", finalize_node))
-
-        graph_builder.add_edge(START, "init_project")
-        graph_builder.add_edge("init_project", "add_source_code")
-        graph_builder.add_edge("add_source_code", "apply_schema_mapping")
-        graph_builder.add_edge("apply_schema_mapping", "convert_code")
-        graph_builder.add_edge("convert_code", "execute_sql")
-        graph_builder.add_conditional_edges(
-            "execute_sql",
-            route_after_execute,
-            {
-                "validate": "validate",
-                "self_heal": "self_heal",
-                "human_review": "human_review",
+        node_handlers: Dict[str, Dict[str, Any]] = {
+            "init_project": {
+                "fn": init_project_node,
+                "success_log": "Project initialized.",
+                "post_hook": None,
             },
-        )
-        graph_builder.add_edge("self_heal", "execute_sql")
-        graph_builder.add_conditional_edges(
-            "validate",
-            route_after_validate,
-            {
-                "finalize": "finalize",
-                "human_review": "human_review",
+            "add_source_code": {
+                "fn": add_source_code_node,
+                "success_log": "Source code added.",
+                "post_hook": None,
             },
+            "apply_schema_mapping": {
+                "fn": apply_schema_mapping_node,
+                "success_log": "Schema mapping applied.",
+                "post_hook": None,
+            },
+            "convert_code": {
+                "fn": convert_code_node,
+                "success_log": "Code conversion complete.",
+                "post_hook": None,
+            },
+            "execute_sql": {
+                "fn": execute_sql_node,
+                "success_log": "Execute SQL stage completed.",
+                "post_hook": lambda updated: (sync_execution_state(updated), emit_execute_events(updated)),
+            },
+            "self_heal": {
+                "fn": self_heal_node,
+                "success_log": None,
+                "post_hook": sync_self_heal_state,
+            },
+            "validate": {
+                "fn": validate_node,
+                "success_log": None,
+                "post_hook": sync_validation_state,
+            },
+            "human_review": {
+                "fn": human_review_node,
+                "success_log": None,
+                "post_hook": None,
+            },
+            "finalize": {
+                "fn": finalize_node,
+                "success_log": None,
+                "post_hook": None,
+            },
+        }
+
+        orchestrator = SnowflakeCortexOrchestrator(
+            timeout_seconds=ORCHESTRATOR_TIMEOUT_SECONDS,
+            retries=ORCHESTRATOR_RETRIES,
         )
-        graph_builder.add_edge("human_review", END)
-        graph_builder.add_edge("finalize", END)
+        current_step = resume_from_stage if resume_ddl_path and resume_from_stage in node_handlers else "init_project"
 
-        workflow = graph_builder.compile()
-        final_state = workflow.invoke({"context": context})
-        final_context = final_state["context"]
+        while current_step != WORKFLOW_END_STEP:
+            ensure_not_canceled(run_id)
 
-        if final_context.current_stage == MigrationState.COMPLETED:
-            set_run_status(run, "completed")
-            append_event(run, "run:completed", {"runId": run_id})
-            append_chat_message(
+            if current_step not in node_handlers:
+                raise RuntimeError(f"Unknown workflow step: {current_step}")
+
+            handler = node_handlers[current_step]
+            result = run_node_safe(
                 run,
-                role="system",
-                kind="run_status",
-                content="Migration completed.",
+                run_id,
+                context,
+                current_step,
+                handler["fn"],
+                success_log=handler["success_log"],
+                post_hook=handler["post_hook"],
             )
-            return
+            context = result.context
 
-        reason = final_context.human_intervention_reason or "Migration stopped before completion"
-        set_run_status(run, "failed", reason)
-        append_event(run, "run:failed", {"runId": run_id, "reason": reason})
-        if final_context.current_stage == MigrationState.HUMAN_REVIEW:
-            add_log(run, reason, step_id="human_review")
+            next_step = _resolve_next_step(
+                run,
+                context,
+                current_step,
+                success=result.success,
+                orchestrator=orchestrator,
+            )
+
+            if not result.success and next_step == current_step:
+                context.node_retry_counts[current_step] = int(context.node_retry_counts.get(current_step, 0)) + 1
+
+            if next_step == WORKFLOW_END_STEP:
+                if current_step == "finalize" and result.success and context.current_stage == MigrationState.COMPLETED:
+                    set_run_status(run, "completed")
+                    append_event(run, "run:completed", {"runId": run_id})
+                    append_chat_message(
+                        run,
+                        role="system",
+                        kind="run_status",
+                        content="Migration completed.",
+                    )
+                    return
+
+                reason = context.human_intervention_reason or result.error or "Migration stopped before completion"
+                set_run_status(run, "failed", reason)
+                append_event(run, "run:failed", {"runId": run_id, "reason": reason})
+                if current_step == "human_review" or context.current_stage == MigrationState.HUMAN_REVIEW:
+                    add_log(run, reason, step_id="human_review")
+                append_chat_message(
+                    run,
+                    role="error",
+                    kind="run_status",
+                    content=reason,
+                )
+                return
+
+            current_step = next_step
     except Exception as exc:
         message = str(exc)
         canceled = message == "Run canceled"

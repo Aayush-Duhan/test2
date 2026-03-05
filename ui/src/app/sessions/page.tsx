@@ -14,23 +14,27 @@ import {
   type ChatMessage,
   type ExecuteStatementEvent,
   type ExecuteErrorEvent,
+  type OrchestratorDecisionEvent,
   type CurrentExecution,
+  type TerminalEvent,
+  isTerminalChatKind,
 } from "@/lib/chat-types";
 import {
   isActive,
   makeMessage,
-  makeThinkingMessage,
   mergeSteps,
   buildTasks,
   flattenExecutionLog,
   makeSqlStatementMessage,
   makeSqlErrorMessage,
   buildSqlExecutionMessages,
+  makeOrchestratorThinkingMessage,
 } from "@/lib/chat-helpers";
 import {
   getWizardState,
   resetWizard,
 } from "@/lib/wizard-store";
+import { workbenchStore } from "@/lib/workbench-store";
 
 function isChatMessage(value: unknown): value is ChatMessage {
   if (!value || typeof value !== "object") return false;
@@ -48,9 +52,71 @@ type PersistedRunEvent = {
   payload?: Record<string, unknown>;
 };
 
+function coerceOrchestratorDecisionEvent(raw: unknown): OrchestratorDecisionEvent | null {
+  if (!raw || typeof raw !== "object") return null;
+  return raw as OrchestratorDecisionEvent;
+}
+
+function coerceTerminalEvent(raw: unknown, runId: string): TerminalEvent | null {
+  if (!raw || typeof raw !== "object") return null;
+  const row = raw as Record<string, unknown>;
+  if (row.type === "terminal:command") {
+    const command = typeof row.command === "string" ? row.command.trim() : "";
+    if (!command) return null;
+    return {
+      type: "terminal:command",
+      runId: typeof row.runId === "string" ? row.runId : runId,
+      ts: typeof row.ts === "string" ? row.ts : new Date().toISOString(),
+      stepId: typeof row.stepId === "string" ? row.stepId : undefined,
+      command,
+      cwd: typeof row.cwd === "string" ? row.cwd : undefined,
+      attempt: typeof row.attempt === "number" ? row.attempt : undefined,
+    };
+  }
+  if (row.type === "terminal:line") {
+    const text = typeof row.text === "string" ? row.text.trim() : "";
+    if (!text) return null;
+    const stream = row.stream === "stderr" ? "stderr" : row.stream === "meta" ? "meta" : "stdout";
+    return {
+      type: "terminal:line",
+      runId: typeof row.runId === "string" ? row.runId : runId,
+      ts: typeof row.ts === "string" ? row.ts : new Date().toISOString(),
+      stepId: typeof row.stepId === "string" ? row.stepId : undefined,
+      stream,
+      text,
+    };
+  }
+  return null;
+}
+
+function splitHydratedMessages(messages: ChatMessage[], runId: string): {
+  chat: ChatMessage[];
+  terminal: TerminalEvent[];
+} {
+  const chat: ChatMessage[] = [];
+  const terminal: TerminalEvent[] = [];
+  for (const message of messages) {
+    if (isTerminalChatKind(message.kind)) {
+      const text = typeof message.content === "string" ? message.content.trim() : "";
+      if (!text) continue;
+      terminal.push({
+        type: "terminal:line",
+        runId,
+        ts: message.ts ?? new Date().toISOString(),
+        stepId: message.step?.id,
+        stream: "meta",
+        text,
+      });
+      continue;
+    }
+    chat.push(message);
+  }
+  return { chat, terminal };
+}
+
 function buildHydratedMessagesFallback(
   events: unknown,
-  logs: unknown,
+  _logs: unknown,
   statements: ExecuteStatementEvent[],
   errors: ExecuteErrorEvent[],
 ): ChatMessage[] {
@@ -77,7 +143,7 @@ function buildHydratedMessagesFallback(
         continue;
       }
 
-      if (hasChatMessageEvents) {
+      if (hasChatMessageEvents && type !== "step:failed" && type !== "orchestrator:decision") {
         // When canonical chat events exist, ignore legacy event mirrors to prevent duplicates.
         continue;
       }
@@ -100,22 +166,32 @@ function buildHydratedMessagesFallback(
         continue;
       }
 
-      if (type === "log") {
+      if (type === "step:failed") {
         usedEventTimeline = true;
-        const message = typeof payload.message === "string" ? payload.message.trim() : "";
-        if (message.length > 0) {
-          timeline.push(makeMessage("agent", message, "log"));
+        const label = typeof payload.label === "string" ? payload.label : payload.stepId;
+        const reason = typeof payload.reason === "string" ? payload.reason : "Step failed";
+        if (typeof label === "string" && label.length > 0) {
+          timeline.push(makeMessage("error", `Failed: ${label}. ${reason}`, "run_status"));
+        } else {
+          timeline.push(makeMessage("error", reason, "run_status"));
         }
         continue;
       }
 
-      if (type === "selfheal:iteration") {
+      if (type === "orchestrator:decision") {
         usedEventTimeline = true;
-        timeline.push(
-          makeThinkingMessage(
-            `Self-heal iteration ${String(payload.iteration ?? "?")}\nAnalyzing execution errors and generating fixes via Snowflake Cortex...`
-          )
-        );
+        const decision = coerceOrchestratorDecisionEvent(payload);
+        if (decision) {
+          timeline.push(makeOrchestratorThinkingMessage(decision));
+        }
+        continue;
+      }
+
+      if (type === "log") {
+        continue;
+      }
+
+      if (type === "selfheal:iteration") {
         continue;
       }
 
@@ -154,19 +230,119 @@ function buildHydratedMessagesFallback(
     }
   }
 
-  if (!usedEventTimeline && Array.isArray(logs)) {
-    for (const raw of logs) {
-      if (typeof raw === "string" && raw.trim().length > 0) {
-        timeline.push(makeMessage("agent", raw, "log"));
-      }
-    }
-  }
-
   if (!usedEventTimeline) {
     return [...timeline, ...buildSqlExecutionMessages(statements, errors)];
   }
 
   return timeline;
+}
+
+function buildSupplementalEventMessages(events: unknown): ChatMessage[] {
+  if (!Array.isArray(events)) return [];
+  const out: ChatMessage[] = [];
+  for (const raw of events) {
+    if (!raw || typeof raw !== "object") continue;
+    const event = raw as PersistedRunEvent;
+    const type = typeof event.type === "string" ? event.type : "";
+    const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+
+    if (type === "step:failed") {
+      const label = typeof payload.label === "string" ? payload.label : payload.stepId;
+      const reason = typeof payload.reason === "string" ? payload.reason : "Step failed";
+      out.push(
+        makeMessage(
+          "error",
+          typeof label === "string" && label.length > 0 ? `Failed: ${label}. ${reason}` : reason,
+          "run_status"
+        )
+      );
+      continue;
+    }
+
+    if (type === "orchestrator:decision") {
+      const decision = coerceOrchestratorDecisionEvent(payload);
+      if (decision) out.push(makeOrchestratorThinkingMessage(decision));
+    }
+  }
+  return out;
+}
+
+function buildHydratedTerminalFallback(
+  runId: string,
+  events: unknown,
+  logs: unknown,
+  messages: unknown,
+): TerminalEvent[] {
+  const hydrated: TerminalEvent[] = [];
+  const hasDedicatedTerminalEvents = Array.isArray(events)
+    ? events.some((raw) => {
+      if (!raw || typeof raw !== "object") return false;
+      const event = raw as PersistedRunEvent;
+      return event.type === "terminal:command" || event.type === "terminal:line";
+    })
+    : false;
+
+  if (Array.isArray(events)) {
+    for (const raw of events) {
+      if (!raw || typeof raw !== "object") continue;
+      const event = raw as PersistedRunEvent;
+      const type = typeof event.type === "string" ? event.type : "";
+      const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+
+      if (type === "terminal:command" || type === "terminal:line") {
+        const terminal = coerceTerminalEvent({ type, ...payload }, runId);
+        if (terminal) {
+          hydrated.push(terminal);
+        }
+        continue;
+      }
+
+      if (!hasDedicatedTerminalEvents && type === "log") {
+        const message = typeof payload.message === "string" ? payload.message.trim() : "";
+        if (!message) continue;
+        hydrated.push({
+          type: "terminal:line",
+          runId,
+          ts: new Date().toISOString(),
+          stream: "meta",
+          text: message,
+        });
+      }
+    }
+  }
+
+  if (!hasDedicatedTerminalEvents && Array.isArray(messages)) {
+    for (const row of messages) {
+      if (!isChatMessage(row) || !isTerminalChatKind(row.kind)) continue;
+      const text = row.content.trim();
+      if (!text) continue;
+      hydrated.push({
+        type: "terminal:line",
+        runId,
+        ts: row.ts ?? new Date().toISOString(),
+        stepId: row.step?.id,
+        stream: "meta",
+        text,
+      });
+    }
+  }
+
+  if (!hasDedicatedTerminalEvents && Array.isArray(logs)) {
+    for (const row of logs) {
+      if (typeof row !== "string") continue;
+      const text = row.trim();
+      if (!text) continue;
+      hydrated.push({
+        type: "terminal:line",
+        runId,
+        ts: new Date().toISOString(),
+        stream: "meta",
+        text,
+      });
+    }
+  }
+
+  return hydrated;
 }
 
 /* ================================================================
@@ -233,6 +409,7 @@ export default function SessionsPage() {
   const hydrateRun = React.useCallback(async (targetRunId: string) => {
     setIsBusy(true);
     setError(null);
+    workbenchStore.clearTerminalEvents();
     const res = await fetch(`/api/runs/${targetRunId}`, { cache: "no-store" });
     if (!res.ok) { setError("Unable to load session"); setIsBusy(false); return; }
     const data = await res.json();
@@ -276,9 +453,27 @@ export default function SessionsPage() {
     const hydratedMessages = Array.isArray(data.messages)
       ? data.messages.filter(isChatMessage)
       : [];
-    if (hydratedMessages.length > 0) {
+    const splitMessages = splitHydratedMessages(hydratedMessages, targetRunId);
+    const hydratedTerminalFromRun = Array.isArray(data.terminalEvents)
+      ? data.terminalEvents
+        .map((row: unknown) => coerceTerminalEvent(row, targetRunId))
+        .filter((row: TerminalEvent | null): row is TerminalEvent => row !== null)
+      : [];
+    const fallbackTerminal = buildHydratedTerminalFallback(
+      targetRunId,
+      data.events,
+      data.logs,
+      data.messages,
+    );
+    workbenchStore.setTerminalEvents([
+      ...hydratedTerminalFromRun,
+      ...(hydratedTerminalFromRun.length > 0 ? [] : fallbackTerminal),
+      ...(hydratedTerminalFromRun.length > 0 ? [] : splitMessages.terminal),
+    ]);
+
+    if (splitMessages.chat.length > 0) {
       chatSchemaReadyRef.current = true;
-      setMessages(hydratedMessages);
+      setMessages([...splitMessages.chat, ...buildSupplementalEventMessages(data.events)]);
     } else {
       chatSchemaReadyRef.current = false;
       setMessages(buildHydratedMessagesFallback(data.events, data.logs, s, e));
@@ -296,9 +491,26 @@ export default function SessionsPage() {
       const snapshotMessages = Array.isArray(data.messages)
         ? data.messages.filter(isChatMessage)
         : [];
+      const splitMessages = splitHydratedMessages(snapshotMessages, targetRunId);
+      const snapshotTerminal = Array.isArray(data.terminalEvents)
+        ? data.terminalEvents
+          .map((row: unknown) => coerceTerminalEvent(row, targetRunId))
+          .filter((row: TerminalEvent | null): row is TerminalEvent => row !== null)
+        : [];
+      const fallbackTerminal = buildHydratedTerminalFallback(
+        targetRunId,
+        data.events,
+        data.logs,
+        data.messages,
+      );
+      workbenchStore.setTerminalEvents([
+        ...snapshotTerminal,
+        ...(snapshotTerminal.length > 0 ? [] : fallbackTerminal),
+        ...(snapshotTerminal.length > 0 ? [] : splitMessages.terminal),
+      ]);
       if (snapshotMessages.length > 0) {
         chatSchemaReadyRef.current = true;
-        setMessages(snapshotMessages);
+        setMessages([...splitMessages.chat, ...buildSupplementalEventMessages(data.events)]);
       } else if (!chatSchemaReadyRef.current) {
         const ss = flattenExecutionLog(data.executionLog);
         const se: ExecuteErrorEvent[] = Array.isArray(data.executionErrors) ? data.executionErrors : [];
@@ -344,6 +556,7 @@ export default function SessionsPage() {
     setStatus("idle");
     setSteps(STEP_BLUEPRINT);
     setMessages([]);
+    workbenchStore.clearTerminalEvents();
     setExecuteStatements([]);
     setExecuteErrors([]);
     setRequiresDdlUpload(false);
@@ -405,6 +618,7 @@ export default function SessionsPage() {
     setError(null);
     setSteps(STEP_BLUEPRINT);
     setMessages([]);
+    workbenchStore.clearTerminalEvents();
     setExecuteStatements([]);
     setExecuteErrors([]);
     setCurrentExecution({ ...INITIAL_EXECUTION, status: "Running" });
@@ -492,6 +706,7 @@ export default function SessionsPage() {
         ...prev,
         makeMessage("system", `Uploaded DDL (${ddlFile.name}). Resuming from checkpoint.`),
       ]);
+      workbenchStore.clearTerminalEvents();
       setExecuteStatements([]);
       setExecuteErrors([]);
       setRequiresDdlUpload(false);
@@ -588,11 +803,23 @@ export default function SessionsPage() {
     source.addEventListener("chat:message", (event) => {
       const payload = JSON.parse((event as MessageEvent).data);
       if (!isChatMessage(payload)) return;
+      if (isTerminalChatKind(payload.kind)) {
+        const text = payload.content.trim();
+        if (!text) return;
+        workbenchStore.appendTerminalEvents([
+          {
+            type: "terminal:line",
+            runId,
+            ts: payload.ts ?? new Date().toISOString(),
+            stepId: payload.step?.id,
+            stream: "meta",
+            text,
+          },
+        ]);
+        return;
+      }
       chatSchemaReadyRef.current = true;
       setMessages((prev) => [...prev, payload]);
-      if (payload.kind === "thinking") {
-        setIsAgentThinking(true);
-      }
     });
 
     source.addEventListener("step:started", (event) => {
@@ -631,6 +858,31 @@ export default function SessionsPage() {
         if (label) {
           setMessages((prev) => [...prev, makeMessage("system", `Completed: ${label}.`, "step_completed")]);
         }
+      }
+    });
+
+    source.addEventListener("step:failed", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data);
+      activeStepRef.current = null;
+      setIsAgentThinking(false);
+      setSteps((prev) => prev.map((s) => (s.id === payload.stepId ? { ...s, status: "failed" } : s)));
+      if (!chatSchemaReadyRef.current) {
+        const label = typeof payload?.label === "string" ? payload.label : payload.stepId;
+        const reason = typeof payload?.reason === "string" ? payload.reason : "Step failed";
+        setMessages((prev) => [
+          ...prev,
+          makeMessage("error", label ? `Failed: ${label}. ${reason}` : reason, "run_status"),
+        ]);
+      }
+    });
+
+    source.addEventListener("orchestrator:decision", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data);
+      const decision = coerceOrchestratorDecisionEvent(payload);
+      if (!decision) return;
+      setMessages((prev) => [...prev, makeOrchestratorThinkingMessage(decision)]);
+      if (decision.resolved_step === "human_review") {
+        setIsAgentThinking(false);
       }
     });
 
@@ -673,18 +925,34 @@ export default function SessionsPage() {
       reloadSidebar();
     });
 
+    source.addEventListener("terminal:command", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data);
+      const commandEvent = coerceTerminalEvent({ type: "terminal:command", ...payload }, runId);
+      if (!commandEvent) return;
+      workbenchStore.appendTerminalEvents([commandEvent]);
+    });
+
+    source.addEventListener("terminal:line", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data);
+      const lineEvent = coerceTerminalEvent({ type: "terminal:line", ...payload }, runId);
+      if (!lineEvent) return;
+      workbenchStore.appendTerminalEvents([lineEvent]);
+    });
+
     source.addEventListener("log", (event) => {
-      if (chatSchemaReadyRef.current) return;
       const payload = JSON.parse((event as MessageEvent).data);
       const message = typeof payload?.message === "string" ? payload.message.trim() : "";
       if (!message) return;
-      const thinkingSteps = ["self_heal", "convert_code", "validate"];
-      const step = activeStepRef.current;
-      if (step && thinkingSteps.includes(step)) {
-        setMessages((prev) => [...prev, makeThinkingMessage(message)]);
-      } else {
-        setMessages((prev) => [...prev, makeMessage("agent", message, "log")]);
-      }
+      workbenchStore.appendTerminalEvents([
+        {
+          type: "terminal:line",
+          runId,
+          ts: new Date().toISOString(),
+          stepId: typeof activeStepRef.current === "string" ? activeStepRef.current : undefined,
+          stream: "meta",
+          text: message,
+        },
+      ]);
     });
 
     source.addEventListener("selfheal:iteration", (event) => {
@@ -692,14 +960,6 @@ export default function SessionsPage() {
       const iter = Number(payload?.iteration ?? 0);
       if (Number.isFinite(iter)) setSelfHealIteration(iter);
       setIsAgentThinking(true);
-      if (!chatSchemaReadyRef.current) {
-        setMessages((prev) => [
-          ...prev,
-          makeThinkingMessage(
-            `Self-heal iteration ${payload?.iteration ?? "?"}\nAnalyzing execution errors and generating fixes via Snowflake Cortex...`
-          ),
-        ]);
-      }
     });
 
     source.addEventListener("execute_sql:statement", (event) => {

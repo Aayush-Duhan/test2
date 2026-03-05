@@ -305,6 +305,22 @@ def list_runs() -> List[Dict[str, Any]]:
                 else:
                     execution_log.append(item)
 
+            parsed_events = [
+                {
+                    "type": event[0],
+                    "payload": _json_load(event[1], {}),
+                    "timestamp": event[2],
+                }
+                for event in events
+            ]
+            terminal_events = [
+                item.get("payload", {})
+                for item in parsed_events
+                if isinstance(item, dict)
+                and item.get("type") in {"terminal:command", "terminal:line"}
+                and isinstance(item.get("payload"), dict)
+            ]
+
             result.append(
                 {
                     "runId": run_id,
@@ -344,14 +360,8 @@ def list_runs() -> List[Dict[str, Any]]:
                         for step in steps
                     ],
                     "logs": [log[0] for log in logs],
-                    "events": [
-                        {
-                            "type": event[0],
-                            "payload": _json_load(event[1], {}),
-                            "timestamp": event[2],
-                        }
-                        for event in events
-                    ],
+                    "events": parsed_events,
+                    "terminalEvents": terminal_events,
                     "messages": [
                         {
                             "id": message[0],

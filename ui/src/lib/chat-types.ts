@@ -21,6 +21,23 @@ export type ExecuteErrorEvent = {
   failedStatementIndex?: number;
 };
 
+export type OrchestratorDecisionEvent = {
+  from_step?: string;
+  candidate_steps?: string[];
+  selected_step?: string;
+  confidence?: number;
+  reason?: string;
+  summary?: string;
+  next_steps?: string[];
+  attempt?: number;
+  latency_ms?: number;
+  model?: string;
+  status?: string;
+  error?: string | null;
+  resolved_step?: string;
+  guarded_candidates?: string[];
+};
+
 export type SessionSummary = {
   runId: string;
   projectName: string;
@@ -62,6 +79,31 @@ export type ChatMessage = {
   step?: { id: string; label: string };
   sql?: ChatSqlDetails;
 };
+
+export type TerminalStream = "stdout" | "stderr" | "meta";
+
+export type TerminalEvent =
+  | {
+      type: "terminal:command";
+      runId: string;
+      ts: string;
+      stepId?: string;
+      command: string;
+      cwd?: string;
+      attempt?: number;
+    }
+  | {
+      type: "terminal:line";
+      runId: string;
+      ts: string;
+      stepId?: string;
+      stream: TerminalStream;
+      text: string;
+    };
+
+export function isTerminalChatKind(kind: ChatMessageKind): kind is "log" | "thinking" {
+  return kind === "log" || kind === "thinking";
+}
 
 /* ── Execution tracker ───────────────────────────────────── */
 

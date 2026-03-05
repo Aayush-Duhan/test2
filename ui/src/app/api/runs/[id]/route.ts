@@ -26,6 +26,7 @@ interface PythonRunDetail {
   validationIssues?: unknown[];
   executionLog?: unknown[];
   executionErrors?: unknown[];
+  terminalEvents?: unknown[];
   missingObjects?: string[];
   requiresDdlUpload?: boolean;
   resumeFromStage?: string;
@@ -65,6 +66,7 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
         validationIssues: run.validationIssues ?? [],
         executionLog: run.executionLog ?? [],
         executionErrors: run.executionErrors ?? [],
+        terminalEvents: run.terminalEvents ?? [],
         missingObjects: run.missingObjects ?? [],
         requiresDdlUpload: run.requiresDdlUpload ?? false,
         resumeFromStage: run.resumeFromStage ?? "",

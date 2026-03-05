@@ -20,6 +20,12 @@ from .nodes import (
     human_review_node,
     finalize_node,
 )
+from .orchestrator import (
+    DecisionContext,
+    OrchestratorDecision,
+    SnowflakeCortexOrchestrator,
+    build_decision_context,
+)
 
 # Decision function
 from .decision import should_continue, should_continue_after_execute
@@ -42,6 +48,10 @@ __all__ = [
     "validate_node",
     "human_review_node",
     "finalize_node",
+    "DecisionContext",
+    "OrchestratorDecision",
+    "SnowflakeCortexOrchestrator",
+    "build_decision_context",
     # Decision
     "should_continue",
     "should_continue_after_execute",
