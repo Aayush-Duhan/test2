@@ -126,22 +126,26 @@ export function ChatPanel({
   React.useEffect(() => {
     if (!projectId) return;
 
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const isRunActive = status === "running" || status === "queued";
+    // Eager initial sync so files appear immediately on mount
+    void syncProjectFiles(projectId);
 
-    const tick = async () => {
-      await syncProjectFiles(projectId);
-      if (!cancelled && isRunActive) {
-        timer = setTimeout(tick, 2500);
-      }
-    };
+    // Subscribe to the file-watcher SSE stream for instant updates.
+    // The watcher monitors the entire project root so it detects files
+    // even when parent directories are created after it starts.
+    const source = new EventSource(`/api/projects/${projectId}/watch`);
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-    void tick();
+    source.addEventListener("files:changed", () => {
+      // Debounce rapid bursts (e.g. multi-file writes) into a single sync
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        void syncProjectFiles(projectId);
+      }, 300);
+    });
 
     return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
+      source.close();
+      if (debounceTimer) clearTimeout(debounceTimer);
     };
   }, [projectId, runId, status, syncProjectFiles]);
 
@@ -445,8 +449,8 @@ function SqlBlockSection({
       <div className="mb-1 flex items-center gap-2">
         <span
           className={`rounded-full border px-2 py-0.5 text-[11px] ${isError
-              ? "border-red-400/40 bg-red-500/15 text-red-100"
-              : "border-white/20 bg-white/10 text-white/80"
+            ? "border-red-400/40 bg-red-500/15 text-red-100"
+            : "border-white/20 bg-white/10 text-white/80"
             }`}
         >
           {title}
@@ -454,8 +458,8 @@ function SqlBlockSection({
       </div>
       <pre
         className={`max-h-52 overflow-auto whitespace-pre-wrap rounded-xl border px-3 py-2 text-xs ${isError
-            ? "border-red-400/30 bg-red-500/10 text-red-100"
-            : "border-white/10 bg-black/30 text-white/85"
+          ? "border-red-400/30 bg-red-500/10 text-red-100"
+          : "border-white/10 bg-black/30 text-white/85"
           }`}
       >
         {content}
