@@ -1,11 +1,7 @@
 python-dotenv
-streamlit
 snowflake-connector-python[secure-local-storage]
 snowflake_snowpark_python
 pandas
-numpy
-streamlit-aggrid
-python-docx
 fastapi
 uvicorn
 python-multipart

@@ -332,14 +332,16 @@ function NodeLogTimeline({
             <StepCheckpointCard key={`fallback-${step.id}`} title={step.title} status={step.status} runStatus={runStatus} />
           ))}
 
-      {messages.map((message) => {
+      {messages.map((message, index) => {
+        const renderKey = `${message.id}-${message.ts ?? "no-ts"}-${index}`;
+
         if (message.kind === "step_started" || message.kind === "step_completed") {
           const title = message.step?.label ?? sanitizeMessageContent(message.content);
           const statusFromTasks = message.step?.id ? stepStatusById.get(message.step.id) : undefined;
           const fallbackStatus = message.kind === "step_completed" ? "completed" : "in-progress";
           return (
             <StepCheckpointCard
-              key={message.id}
+              key={renderKey}
               title={title}
               status={statusFromTasks ?? fallbackStatus}
               runStatus={runStatus}
@@ -347,7 +349,7 @@ function NodeLogTimeline({
           );
         }
 
-        return <ChatBubble key={message.id} message={message} />;
+        return <ChatBubble key={renderKey} message={message} />;
       })}
     </div>
   );

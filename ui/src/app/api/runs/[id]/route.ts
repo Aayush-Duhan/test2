@@ -8,7 +8,6 @@ interface PythonRunDetail {
   projectId: string;
   status: string;
   steps: unknown;
-  artifacts: unknown[];
   logs: string[];
   projectName: string;
   sourceId: string;
@@ -48,7 +47,6 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
         projectId: run.projectId,
         status: run.status,
         steps: run.steps,
-        artifacts: run.artifacts,
         logs: run.logs,
         projectName: run.projectName,
         sourceId: run.sourceId,

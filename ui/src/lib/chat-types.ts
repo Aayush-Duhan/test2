@@ -33,7 +33,6 @@ export type SessionSummary = {
   executionErrors?: ExecuteErrorEvent[];
 };
 
-export type ArtifactSummary = { name: string; type: string; createdAt: string };
 
 /* ── Chat messages ───────────────────────────────────────── */
 
@@ -85,7 +84,7 @@ export const STEP_BLUEPRINT: StepState[] = [
   { id: "self_heal", label: "Self-heal fixes", status: "pending" },
   { id: "validate", label: "Validate output", status: "pending" },
   { id: "human_review", label: "Human review", status: "pending" },
-  { id: "finalize", label: "Finalize artifacts", status: "pending" },
+  { id: "finalize", label: "Finalize output", status: "pending" },
 ];
 
 export const INITIAL_EXECUTION: CurrentExecution = {

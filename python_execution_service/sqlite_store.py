@@ -159,22 +159,6 @@ def save_run_snapshot(run: Dict[str, Any]) -> None:
                 ),
             )
 
-        conn.execute("DELETE FROM run_artifacts WHERE run_id = ?", (run["runId"],))
-        for artifact in run.get("artifacts", []):
-            conn.execute(
-                """
-                INSERT INTO run_artifacts(run_id, name, type, path, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    run["runId"],
-                    artifact.get("name", ""),
-                    artifact.get("type", "other"),
-                    artifact.get("path", ""),
-                    artifact.get("createdAt", _now_iso()),
-                ),
-            )
-
         conn.execute("DELETE FROM run_validation_issues WHERE run_id = ?", (run["runId"],))
         for item in run.get("validationIssues", []):
             conn.execute(
@@ -263,15 +247,6 @@ def list_runs() -> List[Dict[str, Any]]:
                 FROM run_steps
                 WHERE run_id = ?
                 ORDER BY rowid
-                """,
-                (run_id,),
-            ).fetchall()
-            artifacts = conn.execute(
-                """
-                SELECT name, type, path, created_at
-                FROM run_artifacts
-                WHERE run_id = ?
-                ORDER BY id
                 """,
                 (run_id,),
             ).fetchall()
@@ -367,15 +342,6 @@ def list_runs() -> List[Dict[str, Any]]:
                             "endedAt": step[4],
                         }
                         for step in steps
-                    ],
-                    "artifacts": [
-                        {
-                            "name": artifact[0],
-                            "type": artifact[1],
-                            "path": artifact[2],
-                            "createdAt": artifact[3],
-                        }
-                        for artifact in artifacts
                     ],
                     "logs": [log[0] for log in logs],
                     "events": [

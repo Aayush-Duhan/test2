@@ -11,11 +11,12 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypedDict
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
+from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
 from agentic_core.decision import should_continue, should_continue_after_execute
@@ -70,14 +71,6 @@ class RunStep:
 
 
 @dataclass
-class Artifact:
-    name: str
-    type: str
-    path: str
-    createdAt: str
-
-
-@dataclass
 class RunRecord:
     runId: str
     projectId: str
@@ -99,7 +92,6 @@ class RunRecord:
     updatedAt: str
     steps: List[RunStep] = field(default_factory=list)
     logs: List[str] = field(default_factory=list)
-    artifacts: List[Artifact] = field(default_factory=list)
     validationIssues: List[Dict[str, Any]] = field(default_factory=list)
     executionLog: List[Dict[str, Any]] = field(default_factory=list)
     executionErrors: List[Dict[str, Any]] = field(default_factory=list)
@@ -113,6 +105,7 @@ class RunRecord:
     messages: List[Dict[str, Any]] = field(default_factory=list)
     outputDir: str = ""
     ddlUploadPath: str = ""
+    executionEventCursor: int = 0
 
 
 @dataclass
@@ -137,12 +130,16 @@ STEP_LABELS = {
     "self_heal": "Self-heal fixes",
     "validate": "Validate output",
     "human_review": "Human review",
-    "finalize": "Finalize artifacts",
+    "finalize": "Finalize output",
 }
 
 app = FastAPI(title="Python Execution Service", version="0.1.0")
 logger = logging.getLogger(__name__)
 THINKING_STEP_IDS = {"self_heal", "convert_code", "validate"}
+
+
+class WorkflowState(TypedDict):
+    context: MigrationContext
 
 
 @app.exception_handler(RequestValidationError)
@@ -168,7 +165,6 @@ def _serialize_run_record(run: RunRecord) -> Dict[str, Any]:
 
 def _deserialize_run_record(payload: Dict[str, Any]) -> RunRecord:
     steps = [RunStep(**step) for step in payload.get("steps", [])]
-    artifacts = [Artifact(**artifact) for artifact in payload.get("artifacts", [])]
     return RunRecord(
         runId=payload["runId"],
         projectId=payload["projectId"],
@@ -190,7 +186,6 @@ def _deserialize_run_record(payload: Dict[str, Any]) -> RunRecord:
         updatedAt=payload.get("updatedAt", now_iso()),
         steps=steps,
         logs=payload.get("logs", []),
-        artifacts=artifacts,
         validationIssues=payload.get("validationIssues", []),
         executionLog=payload.get("executionLog", []),
         executionErrors=payload.get("executionErrors", []),
@@ -202,6 +197,7 @@ def _deserialize_run_record(payload: Dict[str, Any]) -> RunRecord:
         error=payload.get("error"),
         outputDir=payload.get("outputDir", ""),
         ddlUploadPath=payload.get("ddlUploadPath", ""),
+        executionEventCursor=int(payload.get("executionEventCursor", 0)),
         events=payload.get("events", []),
         messages=payload.get("messages", []),
     )
@@ -463,41 +459,6 @@ def run_node(run: RunRecord, run_id: str, state: MigrationContext, step_id: str,
     return state
 
 
-def attach_artifacts(run: RunRecord, state: MigrationContext) -> None:
-    created = []
-    for file_path in state.output_files:
-        path_obj = Path(file_path)
-        if path_obj.exists():
-            artifact = Artifact(
-                name=path_obj.name,
-                type="sql" if path_obj.suffix.lower() == ".sql" else "other",
-                path=str(path_obj.resolve()),
-                createdAt=now_iso(),
-            )
-            created.append(artifact)
-    if state.summary_report:
-        report_path = Path(run.outputDir) / "summary_report.json"
-        with report_path.open("w", encoding="utf-8") as handle:
-            json.dump(state.summary_report, handle, indent=2, default=str)
-        created.append(
-            Artifact(
-                name="summary_report.json",
-                type="report",
-                path=str(report_path.resolve()),
-                createdAt=now_iso(),
-            )
-        )
-    with RUN_LOCK:
-        run.artifacts.extend(created)
-        persist_runs_locked()
-    for artifact in created:
-        append_event(
-            run,
-            "artifact",
-            {"name": artifact.name, "type": artifact.type, "createdAt": artifact.createdAt},
-        )
-
-
 def execute_run_sync(run_id: str) -> None:
     with RUN_LOCK:
         run = RUNS[run_id]
@@ -514,6 +475,7 @@ def execute_run_sync(run_id: str) -> None:
             kind="run_status",
             content="Migration started.",
         )
+
         def activity_log_sink(entry: Dict[str, Any]) -> None:
             formatted = format_activity_log_entry(entry)
             if formatted:
@@ -549,28 +511,24 @@ def execute_run_sync(run_id: str) -> None:
                 f"Applying uploaded DDL ({Path(resume_ddl_path).name}) before resuming execute_sql.",
             )
 
-        context = run_node(run, run_id, context, "init_project", init_project_node)
-        add_log(run, "Project initialized.")
-        context = run_node(run, run_id, context, "add_source_code", add_source_code_node)
-        add_log(run, "Source code added.")
-        context = run_node(run, run_id, context, "apply_schema_mapping", apply_schema_mapping_node)
-        add_log(run, "Schema mapping applied.")
-        context = run_node(run, run_id, context, "convert_code", convert_code_node)
-        add_log(run, "Code conversion complete.")
-
-        def sync_execution_state() -> None:
+        def sync_execution_state(updated: MigrationContext) -> None:
             with RUN_LOCK:
-                run.executionLog = context.execution_log or []
-                run.executionErrors = context.execution_errors or []
-                run.missingObjects = context.missing_objects or []
-                run.requiresDdlUpload = bool(context.requires_ddl_upload)
-                run.resumeFromStage = context.resume_from_stage or ""
-                run.lastExecutedFileIndex = int(context.last_executed_file_index)
-                run.ddlUploadPath = context.ddl_upload_path or ""
+                run.executionLog = updated.execution_log or []
+                run.executionErrors = updated.execution_errors or []
+                run.missingObjects = updated.missing_objects or []
+                run.requiresDdlUpload = bool(updated.requires_ddl_upload)
+                run.resumeFromStage = updated.resume_from_stage or ""
+                run.lastExecutedFileIndex = int(updated.last_executed_file_index)
+                run.ddlUploadPath = updated.ddl_upload_path or ""
                 persist_runs_locked()
 
-        def emit_execute_events() -> None:
-            for file_entry in context.execution_log or []:
+        def emit_execute_events(updated: MigrationContext) -> None:
+            execution_log = updated.execution_log or []
+            with RUN_LOCK:
+                start_index = max(0, int(run.executionEventCursor))
+            new_entries = execution_log[start_index:]
+
+            for file_entry in new_entries:
                 for statement_entry in file_entry.get("statements", []):
                     append_event(
                         run,
@@ -638,81 +596,134 @@ def execute_run_sync(run_id: str) -> None:
                             "output": f"Error type: {str(file_entry.get('error_type') or 'execution_error')}",
                         },
                     )
+            with RUN_LOCK:
+                run.executionEventCursor = len(execution_log)
+                persist_runs_locked()
 
-        while True:
-            context = run_node(run, run_id, context, "execute_sql", execute_sql_node)
-            add_log(run, "Execute SQL stage completed.")
-            sync_execution_state()
-            emit_execute_events()
+        def sync_validation_state(updated: MigrationContext) -> None:
+            with RUN_LOCK:
+                run.validationIssues = updated.validation_issues or []
+                persist_runs_locked()
+            for issue in updated.validation_issues:
+                append_event(run, "validation:issue", issue if isinstance(issue, dict) else {"message": str(issue)})
 
-            execute_decision = should_continue_after_execute(context)
-            if execute_decision == "human_review":
-                context = run_node(run, run_id, context, "human_review", human_review_node)
-                add_log(run, "Execution paused for human review (DDL upload required).")
-                set_run_status(run, "failed", context.human_intervention_reason or "Execution paused for human review")
-                append_event(
-                    run,
-                    "run:failed",
-                    {"runId": run_id, "reason": context.human_intervention_reason or "Execution paused for human review"},
+        def sync_self_heal_state(updated: MigrationContext) -> None:
+            with RUN_LOCK:
+                run.selfHealIteration = int(updated.self_heal_iteration)
+                persist_runs_locked()
+            append_event(
+                run,
+                "selfheal:iteration",
+                {"iteration": updated.self_heal_iteration, "runId": run_id},
+            )
+            add_log(run, f"Self-heal iteration {updated.self_heal_iteration} applied; re-running execute_sql.")
+
+        def wrap_node(step_id: str, node_fn, *, success_log: Optional[str] = None, post_hook=None):
+            def _wrapped(state_obj: WorkflowState) -> WorkflowState:
+                updated = run_node(run, run_id, state_obj["context"], step_id, node_fn)
+                if success_log:
+                    add_log(run, success_log)
+                if callable(post_hook):
+                    post_hook(updated)
+                return {"context": updated}
+            return _wrapped
+
+        def route_after_execute(state_obj: WorkflowState) -> str:
+            current = state_obj["context"]
+            decision = should_continue_after_execute(current)
+            if decision == "self_heal" and current.self_heal_iteration >= current.max_self_heal_iterations:
+                current.requires_human_intervention = True
+                current.human_intervention_reason = (
+                    f"Could not resolve execution errors after {current.max_self_heal_iterations} self-heal iteration(s)."
                 )
-                return
+                return "human_review"
+            if decision == "finalize":
+                return "validate"
+            return decision
 
-            if execute_decision == "self_heal":
-                if context.self_heal_iteration >= context.max_self_heal_iterations:
-                    context.requires_human_intervention = True
-                    context.human_intervention_reason = (
-                        f"Could not resolve execution errors after {context.max_self_heal_iterations} self-heal iteration(s)."
-                    )
-                    context = run_node(run, run_id, context, "human_review", human_review_node)
-                    set_run_status(run, "failed", context.human_intervention_reason)
-                    append_event(
-                        run,
-                        "run:failed",
-                        {"runId": run_id, "reason": context.human_intervention_reason},
-                    )
-                    return
+        def route_after_validate(state_obj: WorkflowState) -> str:
+            current = state_obj["context"]
+            decision = should_continue(current)
+            if decision == "finalize":
+                return "finalize"
+            if not current.human_intervention_reason:
+                current.human_intervention_reason = "Validation failed after execution"
+            return "human_review"
 
-                context = run_node(run, run_id, context, "self_heal", self_heal_node)
-                with RUN_LOCK:
-                    run.selfHealIteration = int(context.self_heal_iteration)
-                    persist_runs_locked()
-                append_event(
-                    run,
-                    "selfheal:iteration",
-                    {"iteration": context.self_heal_iteration, "runId": run_id},
-                )
-                add_log(run, f"Self-heal iteration {context.self_heal_iteration} applied; re-running execute_sql.")
-                continue
+        graph_builder = StateGraph(WorkflowState)
+        graph_builder.add_node("init_project", wrap_node("init_project", init_project_node, success_log="Project initialized."))
+        graph_builder.add_node("add_source_code", wrap_node("add_source_code", add_source_code_node, success_log="Source code added."))
+        graph_builder.add_node(
+            "apply_schema_mapping",
+            wrap_node("apply_schema_mapping", apply_schema_mapping_node, success_log="Schema mapping applied."),
+        )
+        graph_builder.add_node("convert_code", wrap_node("convert_code", convert_code_node, success_log="Code conversion complete."))
+        graph_builder.add_node(
+            "execute_sql",
+            wrap_node(
+                "execute_sql",
+                execute_sql_node,
+                success_log="Execute SQL stage completed.",
+                post_hook=lambda updated: (sync_execution_state(updated), emit_execute_events(updated)),
+            ),
+        )
+        graph_builder.add_node(
+            "self_heal",
+            wrap_node("self_heal", self_heal_node, post_hook=sync_self_heal_state),
+        )
+        graph_builder.add_node(
+            "validate",
+            wrap_node("validate", validate_node, post_hook=sync_validation_state),
+        )
+        graph_builder.add_node("human_review", wrap_node("human_review", human_review_node))
+        graph_builder.add_node("finalize", wrap_node("finalize", finalize_node))
 
-            break
+        graph_builder.add_edge(START, "init_project")
+        graph_builder.add_edge("init_project", "add_source_code")
+        graph_builder.add_edge("add_source_code", "apply_schema_mapping")
+        graph_builder.add_edge("apply_schema_mapping", "convert_code")
+        graph_builder.add_edge("convert_code", "execute_sql")
+        graph_builder.add_conditional_edges(
+            "execute_sql",
+            route_after_execute,
+            {
+                "validate": "validate",
+                "self_heal": "self_heal",
+                "human_review": "human_review",
+            },
+        )
+        graph_builder.add_edge("self_heal", "execute_sql")
+        graph_builder.add_conditional_edges(
+            "validate",
+            route_after_validate,
+            {
+                "finalize": "finalize",
+                "human_review": "human_review",
+            },
+        )
+        graph_builder.add_edge("human_review", END)
+        graph_builder.add_edge("finalize", END)
 
-        context = run_node(run, run_id, context, "validate", validate_node)
-        with RUN_LOCK:
-            run.validationIssues = context.validation_issues or []
-            persist_runs_locked()
-        for issue in context.validation_issues:
-            append_event(run, "validation:issue", issue if isinstance(issue, dict) else {"message": str(issue)})
+        workflow = graph_builder.compile()
+        final_state = workflow.invoke({"context": context})
+        final_context = final_state["context"]
 
-        validation_decision = should_continue(context)
-        if validation_decision != "finalize":
-            if not context.human_intervention_reason:
-                context.human_intervention_reason = "Validation failed after execution"
-            context = run_node(run, run_id, context, "human_review", human_review_node)
-            reason = context.human_intervention_reason or "Validation failed after execution"
-            set_run_status(run, "failed", reason)
-            append_event(run, "run:failed", {"runId": run_id, "reason": reason})
+        if final_context.current_stage == MigrationState.COMPLETED:
+            set_run_status(run, "completed")
+            append_event(run, "run:completed", {"runId": run_id})
+            append_chat_message(
+                run,
+                role="system",
+                kind="run_status",
+                content="Migration completed.",
+            )
             return
 
-        context = run_node(run, run_id, context, "finalize", finalize_node)
-        attach_artifacts(run, context)
-        set_run_status(run, "completed")
-        append_event(run, "run:completed", {"runId": run_id})
-        append_chat_message(
-            run,
-            role="system",
-            kind="run_status",
-            content="Migration completed.",
-        )
+        reason = final_context.human_intervention_reason or "Migration stopped before completion"
+        set_run_status(run, "failed", reason)
+        append_event(run, "run:failed", {"runId": run_id, "reason": reason})
+        if final_context.current_stage == MigrationState.HUMAN_REVIEW:
+            add_log(run, reason, step_id="human_review")
     except Exception as exc:
         message = str(exc)
         canceled = message == "Run canceled"
@@ -872,10 +883,6 @@ def list_runs(
                 "lastExecutedFileIndex": run.lastExecutedFileIndex,
                 "selfHealIteration": run.selfHealIteration,
                 "steps": [asdict(step) for step in run.steps],
-                "artifacts": [
-                    {"name": item.name, "type": item.type, "createdAt": item.createdAt}
-                    for item in run.artifacts
-                ],
             }
         )
     return {"runs": summaries}
@@ -888,10 +895,7 @@ def get_run(run_id: str, x_execution_token: Optional[str] = Header(default=None)
         run = RUNS.get(run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
-        payload = asdict(run)
-        for artifact in payload["artifacts"]:
-            artifact.pop("path", None)
-        return payload
+        return asdict(run)
 
 
 @app.post("/v1/runs/{run_id}/cancel")

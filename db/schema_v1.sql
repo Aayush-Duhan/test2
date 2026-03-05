@@ -73,17 +73,6 @@ CREATE TABLE IF NOT EXISTS run_steps (
   PRIMARY KEY (run_id, step_id)
 );
 
-CREATE TABLE IF NOT EXISTS run_artifacts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
-  name TEXT NOT NULL,
-  type TEXT NOT NULL,
-  path TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_run_artifacts_run_id_id
-  ON run_artifacts(run_id, id);
-
 CREATE TABLE IF NOT EXISTS run_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
