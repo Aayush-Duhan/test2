@@ -469,6 +469,13 @@ export const SetupWizard = React.memo(function SetupWizard({ onStartMigration, i
   const first = isFirstStep();
   const last = isLastStep();
 
+  React.useEffect(() => {
+    resetWizard();
+    return () => {
+      resetWizard();
+    };
+  }, []);
+
   const handleNext = async () => {
     if (last) {
       setStarting(true);

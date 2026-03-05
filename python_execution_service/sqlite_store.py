@@ -1,12 +1,11 @@
-from __future__ import annotations
-
 import json
 import os
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -26,7 +25,7 @@ def _now_iso() -> str:
 
 
 @contextmanager
-def connect() -> Iterable[sqlite3.Connection]:
+def connect() -> Iterator[sqlite3.Connection]:
     db_path = _db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
@@ -72,7 +71,7 @@ def _json_load(value: str, fallback: Any) -> Any:
         return fallback
 
 
-def save_run_snapshot(run: Dict[str, Any]) -> None:
+def save_run_snapshot(run: dict[str, Any]) -> None:
     with connect() as conn:
         conn.execute(
             """
@@ -190,7 +189,7 @@ def append_run_log(run_id: str, message: str, created_at: str) -> None:
         )
 
 
-def append_run_event(run_id: str, event_type: str, payload: Dict[str, Any], timestamp: str) -> None:
+def append_run_event(run_id: str, event_type: str, payload: dict[str, Any], timestamp: str) -> None:
     with connect() as conn:
         conn.execute(
             """
@@ -201,7 +200,7 @@ def append_run_event(run_id: str, event_type: str, payload: Dict[str, Any], time
         )
 
 
-def append_run_message(run_id: str, message: Dict[str, Any]) -> None:
+def append_run_message(run_id: str, message: dict[str, Any]) -> None:
     with connect() as conn:
         conn.execute(
             """
@@ -223,7 +222,7 @@ def append_run_message(run_id: str, message: Dict[str, Any]) -> None:
         )
 
 
-def list_runs() -> List[Dict[str, Any]]:
+def list_runs() -> list[dict[str, Any]]:
     with connect() as conn:
         run_rows = conn.execute(
             """
@@ -238,7 +237,7 @@ def list_runs() -> List[Dict[str, Any]]:
             """
         ).fetchall()
 
-        result: List[Dict[str, Any]] = []
+        result: list[dict[str, Any]] = []
         for row in run_rows:
             run_id = row[0]
             steps = conn.execute(
@@ -296,8 +295,8 @@ def list_runs() -> List[Dict[str, Any]]:
                 (run_id,),
             ).fetchall()
 
-            execution_log: List[Dict[str, Any]] = []
-            execution_errors: List[Dict[str, Any]] = []
+            execution_log: list[dict[str, Any]] = []
+            execution_errors: list[dict[str, Any]] = []
             for entry_type, payload_json in execution_entries:
                 item = _json_load(payload_json, {})
                 if entry_type == "error":
