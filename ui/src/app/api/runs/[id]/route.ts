@@ -8,7 +8,6 @@ interface PythonRunDetail {
   projectId: string;
   status: string;
   steps: unknown;
-  artifacts: unknown[];
   logs: string[];
   projectName: string;
   sourceId: string;
@@ -27,11 +26,14 @@ interface PythonRunDetail {
   validationIssues?: unknown[];
   executionLog?: unknown[];
   executionErrors?: unknown[];
+  terminalEvents?: unknown[];
   missingObjects?: string[];
   requiresDdlUpload?: boolean;
   resumeFromStage?: string;
   lastExecutedFileIndex?: number;
   selfHealIteration?: number;
+  events?: unknown[];
+  messages?: unknown[];
 }
 
 export async function GET(_: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -46,7 +48,6 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
         projectId: run.projectId,
         status: run.status,
         steps: run.steps,
-        artifacts: run.artifacts,
         logs: run.logs,
         projectName: run.projectName,
         sourceId: run.sourceId,
@@ -65,14 +66,16 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
         validationIssues: run.validationIssues ?? [],
         executionLog: run.executionLog ?? [],
         executionErrors: run.executionErrors ?? [],
+        terminalEvents: run.terminalEvents ?? [],
         missingObjects: run.missingObjects ?? [],
         requiresDdlUpload: run.requiresDdlUpload ?? false,
         resumeFromStage: run.resumeFromStage ?? "",
         lastExecutedFileIndex: run.lastExecutedFileIndex ?? -1,
         selfHealIteration: run.selfHealIteration ?? 0,
+        events: run.events ?? [],
+        messages: run.messages ?? [],
       }),
       "Run lookup failed"
     );
   }, "Run lookup failed");
 }
-

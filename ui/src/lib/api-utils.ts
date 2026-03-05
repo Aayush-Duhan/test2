@@ -4,8 +4,8 @@ import { NextResponse } from "next/server";
  * Error payload structure from Python backend
  */
 interface PythonErrorResponse {
-  detail?: string;
-  error?: string;
+  detail?: unknown;
+  error?: unknown;
 }
 
 /**
@@ -14,7 +14,10 @@ interface PythonErrorResponse {
 async function extractErrorMessage(response: Response): Promise<string> {
   try {
     const payload = (await response.json()) as PythonErrorResponse;
-    return payload?.detail ?? payload?.error ?? "Operation failed";
+    const candidate = payload?.detail ?? payload?.error;
+    if (typeof candidate === "string") return candidate;
+    if (candidate == null) return "Operation failed";
+    return JSON.stringify(candidate);
   } catch {
     return "Operation failed";
   }

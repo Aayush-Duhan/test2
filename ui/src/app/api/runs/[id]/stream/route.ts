@@ -4,12 +4,13 @@ import { withErrorHandling } from "@/lib/api-utils";
 export const runtime = "nodejs";
 
 export async function GET(
-  _: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   return withErrorHandling(async () => {
     const { id } = await params;
-    const response = await getPythonRunEvents(id);
+    const lastEventId = request.headers.get("last-event-id");
+    const response = await getPythonRunEvents(id, lastEventId);
 
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => ({}));

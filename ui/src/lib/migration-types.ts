@@ -21,13 +21,6 @@ export interface StepState {
   endedAt?: string;
 }
 
-export interface ArtifactRecord {
-  name: string;
-  type: "sql" | "report" | "log" | "other";
-  url: string;
-  createdAt: string;
-}
-
 export interface MigrationContext {
   projectId: string;
   projectName: string;
@@ -36,7 +29,6 @@ export interface MigrationContext {
   errors: string[];
   createdAt: string;
   updatedAt: string;
-  artifacts: ArtifactRecord[];
   attempts: number;
   needsHumanReview: boolean;
 }
@@ -47,8 +39,9 @@ export type RunEventType =
   | "run:failed"
   | "step:started"
   | "step:completed"
+  | "step:failed"
+  | "orchestrator:decision"
   | "log"
-  | "artifact"
   | "execute_sql:statement"
   | "execute_sql:error";
 
@@ -65,7 +58,6 @@ export interface RunRecord {
   status: RunStatus;
   steps: StepState[];
   logs: string[];
-  artifacts: ArtifactRecord[];
   createdAt: string;
   updatedAt: string;
   error?: string;
@@ -80,5 +72,5 @@ export const STEP_LABELS: Record<StepId, string> = {
   self_heal: "Self-heal fixes",
   validate: "Validate output",
   human_review: "Human review",
-  finalize: "Finalize artifacts",
+  finalize: "Finalize output",
 };

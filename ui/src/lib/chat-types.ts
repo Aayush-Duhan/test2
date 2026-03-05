@@ -21,6 +21,23 @@ export type ExecuteErrorEvent = {
   failedStatementIndex?: number;
 };
 
+export type OrchestratorDecisionEvent = {
+  from_step?: string;
+  candidate_steps?: string[];
+  selected_step?: string;
+  confidence?: number;
+  reason?: string;
+  summary?: string;
+  next_steps?: string[];
+  attempt?: number;
+  latency_ms?: number;
+  model?: string;
+  status?: string;
+  error?: string | null;
+  resolved_step?: string;
+  guarded_candidates?: string[];
+};
+
 export type SessionSummary = {
   runId: string;
   projectName: string;
@@ -33,12 +50,18 @@ export type SessionSummary = {
   executionErrors?: ExecuteErrorEvent[];
 };
 
-export type ArtifactSummary = { name: string; type: string; createdAt: string };
 
 /* ── Chat messages ───────────────────────────────────────── */
 
 export type ChatMessageRole = "system" | "agent" | "error" | "user";
-export type ChatMessageKind = "text" | "sql_statement" | "sql_error" | "thinking";
+export type ChatMessageKind =
+  | "step_started"
+  | "step_completed"
+  | "log"
+  | "thinking"
+  | "sql_statement"
+  | "sql_error"
+  | "run_status";
 
 export type ChatSqlDetails = {
   statement?: string;
@@ -49,11 +72,38 @@ export type ChatSqlDetails = {
 
 export type ChatMessage = {
   id: string;
+  ts?: string;
   role: ChatMessageRole;
   content: string;
   kind: ChatMessageKind;
+  step?: { id: string; label: string };
   sql?: ChatSqlDetails;
 };
+
+export type TerminalStream = "stdout" | "stderr" | "meta";
+
+export type TerminalEvent =
+  | {
+      type: "terminal:command";
+      runId: string;
+      ts: string;
+      stepId?: string;
+      command: string;
+      cwd?: string;
+      attempt?: number;
+    }
+  | {
+      type: "terminal:line";
+      runId: string;
+      ts: string;
+      stepId?: string;
+      stream: TerminalStream;
+      text: string;
+    };
+
+export function isTerminalChatKind(kind: ChatMessageKind): kind is "log" | "thinking" {
+  return kind === "log" || kind === "thinking";
+}
 
 /* ── Execution tracker ───────────────────────────────────── */
 
@@ -76,7 +126,7 @@ export const STEP_BLUEPRINT: StepState[] = [
   { id: "self_heal", label: "Self-heal fixes", status: "pending" },
   { id: "validate", label: "Validate output", status: "pending" },
   { id: "human_review", label: "Human review", status: "pending" },
-  { id: "finalize", label: "Finalize artifacts", status: "pending" },
+  { id: "finalize", label: "Finalize output", status: "pending" },
 ];
 
 export const INITIAL_EXECUTION: CurrentExecution = {

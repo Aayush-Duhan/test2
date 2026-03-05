@@ -20,12 +20,15 @@ from .nodes import (
     human_review_node,
     finalize_node,
 )
+from .orchestrator import (
+    DecisionContext,
+    OrchestratorDecision,
+    SnowflakeCortexOrchestrator,
+    build_decision_context,
+)
 
 # Decision function
 from .decision import should_continue, should_continue_after_execute
-
-# Workflow builder and runner
-from .workflow import build_workflow, run_workflow
 
 # Integration helpers
 from . import integrations
@@ -45,12 +48,13 @@ __all__ = [
     "validate_node",
     "human_review_node",
     "finalize_node",
+    "DecisionContext",
+    "OrchestratorDecision",
+    "SnowflakeCortexOrchestrator",
+    "build_decision_context",
     # Decision
     "should_continue",
     "should_continue_after_execute",
-    # Workflow
-    "build_workflow",
-    "run_workflow",
     # Integration
     "integrations",
 ]

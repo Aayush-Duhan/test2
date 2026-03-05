@@ -70,31 +70,47 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   return withErrorHandling(async () => {
     const body = await request.json().catch(() => null);
-    if (!body?.projectId || !body?.sourceId || !body?.schemaId || !body?.sourceLanguage) {
+    if (!body?.projectId || !body?.sourceId || !body?.sourceLanguage) {
       return NextResponse.json(
-        { error: "projectId, sourceId, schemaId and sourceLanguage required" },
+        { error: "projectId, sourceId and sourceLanguage required" },
         { status: 400 }
       );
     }
 
-    const [project, source, schema] = await Promise.all([
+    const [project, source] = await Promise.all([
       getProject(body.projectId),
       getSource(body.sourceId),
-      getSchema(body.schemaId),
     ]);
-    if (!project || !source || !schema) {
-      return NextResponse.json({ error: "Project/source/schema not found" }, { status: 404 });
+    if (!project || !source) {
+      return NextResponse.json({ error: "Project/source not found" }, { status: 404 });
     }
 
-    const response = await startPythonRun({
+    const schemaId = typeof body.schemaId === "string" && body.schemaId.trim().length > 0
+      ? body.schemaId.trim()
+      : undefined;
+    const schema = schemaId ? await getSchema(schemaId) : undefined;
+    if (schemaId && !schema) {
+      return NextResponse.json({ error: "Schema not found" }, { status: 404 });
+    }
+
+    const pythonPayload = {
       projectId: body.projectId,
       projectName: project.name,
       sourceId: body.sourceId,
-      schemaId: body.schemaId,
+      schemaId,
       sourceLanguage: body.sourceLanguage,
       sourcePath: source.filepath,
-      schemaPath: schema.filepath,
-    });
+      schemaPath: schema?.filepath,
+    };
+    const response = await startPythonRun(pythonPayload);
+
+    if (!response.ok && response.status === 422) {
+      const detail = await response.clone().text().catch(() => "unable to read response body");
+      console.error("[api/runs] Python /v1/runs/start returned 422", {
+        payload: pythonPayload,
+        responseBody: detail,
+      });
+    }
 
     return handlePythonResponse<PythonStartResponse, { runId: string }>(
       response,

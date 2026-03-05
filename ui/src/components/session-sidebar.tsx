@@ -15,7 +15,7 @@ import {
   SidebarMenuSub,
   SidebarMenuSubButton,
   SidebarMenuSubItem,
-  SidebarTrigger,
+  useSidebar,
 } from "@/components/ui/sidebar";
 import type { SessionSummary } from "@/lib/chat-types";
 import { isActive } from "@/lib/chat-helpers";
@@ -34,6 +34,14 @@ export function SessionSidebar({
   const router = useRouter();
   const pathname = usePathname();
   const [open, setOpen] = React.useState(false);
+  const { setOpen: setSidebarOpen, open: isSidebarOpen } = useSidebar();
+
+  const hoverTimeoutRef = React.useRef<NodeJS.Timeout>(undefined);
+
+  React.useEffect(() => {
+    setSidebarOpen(false);
+  }, [pathname, setSidebarOpen]);
+
   const isDashboard = pathname === "/";
   const isSessionsPage = pathname === "/sessions" || pathname.startsWith("/sessions/");
 
@@ -72,10 +80,17 @@ export function SessionSidebar({
     <Sidebar
       collapsible="icon"
       className="p-0 lg:w-64"
+      onMouseEnter={() => {
+        if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
+        setSidebarOpen(true);
+      }}
+      onMouseLeave={() => {
+        hoverTimeoutRef.current = setTimeout(() => {
+          setSidebarOpen(false);
+        }, 150);
+      }}
     >
       <SidebarHeader className="p-2">
-        <SidebarTrigger className="mb-1 self-end text-white hover:bg-white/10 hover:text-white group-data-[collapsible=icon]:self-center" />
-
         {/* Dashboard link */}
         <SidebarMenu>
           <SidebarMenuItem>

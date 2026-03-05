@@ -14,44 +14,335 @@ import {
   type ChatMessage,
   type ExecuteStatementEvent,
   type ExecuteErrorEvent,
+  type OrchestratorDecisionEvent,
   type CurrentExecution,
+  type TerminalEvent,
+  isTerminalChatKind,
 } from "@/lib/chat-types";
 import {
   isActive,
   makeMessage,
-  makeThinkingMessage,
   mergeSteps,
   buildTasks,
   flattenExecutionLog,
   makeSqlStatementMessage,
   makeSqlErrorMessage,
   buildSqlExecutionMessages,
+  makeOrchestratorThinkingMessage,
 } from "@/lib/chat-helpers";
 import {
   getWizardState,
   resetWizard,
 } from "@/lib/wizard-store";
+import { workbenchStore } from "@/lib/workbench-store";
 
-function stripLogTags(message: string): string {
-  return message.replace(/^\s*(?:\[[^\]]+\]\s*)+/, "").trim();
+function isChatMessage(value: unknown): value is ChatMessage {
+  if (!value || typeof value !== "object") return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.id === "string" &&
+    typeof row.role === "string" &&
+    typeof row.kind === "string" &&
+    typeof row.content === "string"
+  );
 }
 
-function cleanTerminalOutput(message: string): string {
-  const ansiStripped = message.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
-  return ansiStripped
-    .split(/\r?\n/)
-    .map((line) =>
-      line
-        .replace(/[\u2500-\u257f\u2580-\u259f]/g, " ")
-        .replace(/[À-ÿ]/g, " ")
-        .replace(/[=]{3,}/g, " ")
-        .replace(/[?]{5,}/g, " ")
-        .replace(/\s{2,}/g, " ")
-        .trim(),
-    )
-    .filter((line) => line.length > 0)
-    .filter((line) => !/^[=\-_*~.#|:+`^]+$/.test(line))
-    .join("\n");
+type PersistedRunEvent = {
+  type?: string;
+  payload?: Record<string, unknown>;
+};
+
+function coerceOrchestratorDecisionEvent(raw: unknown): OrchestratorDecisionEvent | null {
+  if (!raw || typeof raw !== "object") return null;
+  return raw as OrchestratorDecisionEvent;
+}
+
+function coerceTerminalEvent(raw: unknown, runId: string): TerminalEvent | null {
+  if (!raw || typeof raw !== "object") return null;
+  const row = raw as Record<string, unknown>;
+  if (row.type === "terminal:command") {
+    const command = typeof row.command === "string" ? row.command.trim() : "";
+    if (!command) return null;
+    return {
+      type: "terminal:command",
+      runId: typeof row.runId === "string" ? row.runId : runId,
+      ts: typeof row.ts === "string" ? row.ts : new Date().toISOString(),
+      stepId: typeof row.stepId === "string" ? row.stepId : undefined,
+      command,
+      cwd: typeof row.cwd === "string" ? row.cwd : undefined,
+      attempt: typeof row.attempt === "number" ? row.attempt : undefined,
+    };
+  }
+  if (row.type === "terminal:line") {
+    const text = typeof row.text === "string" ? row.text.trim() : "";
+    if (!text) return null;
+    const stream = row.stream === "stderr" ? "stderr" : row.stream === "meta" ? "meta" : "stdout";
+    return {
+      type: "terminal:line",
+      runId: typeof row.runId === "string" ? row.runId : runId,
+      ts: typeof row.ts === "string" ? row.ts : new Date().toISOString(),
+      stepId: typeof row.stepId === "string" ? row.stepId : undefined,
+      stream,
+      text,
+    };
+  }
+  return null;
+}
+
+function splitHydratedMessages(messages: ChatMessage[], runId: string): {
+  chat: ChatMessage[];
+  terminal: TerminalEvent[];
+} {
+  const chat: ChatMessage[] = [];
+  const terminal: TerminalEvent[] = [];
+  for (const message of messages) {
+    if (isTerminalChatKind(message.kind)) {
+      const text = typeof message.content === "string" ? message.content.trim() : "";
+      if (!text) continue;
+      terminal.push({
+        type: "terminal:line",
+        runId,
+        ts: message.ts ?? new Date().toISOString(),
+        stepId: message.step?.id,
+        stream: "meta",
+        text,
+      });
+      continue;
+    }
+    chat.push(message);
+  }
+  return { chat, terminal };
+}
+
+function buildHydratedMessagesFallback(
+  events: unknown,
+  _logs: unknown,
+  statements: ExecuteStatementEvent[],
+  errors: ExecuteErrorEvent[],
+): ChatMessage[] {
+  const timeline: ChatMessage[] = [];
+  let usedEventTimeline = false;
+
+  if (Array.isArray(events)) {
+    const hasChatMessageEvents = events.some((raw) => {
+      if (!raw || typeof raw !== "object") return false;
+      const event = raw as PersistedRunEvent;
+      if (event.type !== "chat:message") return false;
+      return isChatMessage(event.payload);
+    });
+
+    for (const raw of events) {
+      if (!raw || typeof raw !== "object") continue;
+      const event = raw as PersistedRunEvent;
+      const type = typeof event.type === "string" ? event.type : "";
+      const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+
+      if (type === "chat:message" && isChatMessage(payload)) {
+        usedEventTimeline = true;
+        timeline.push(payload);
+        continue;
+      }
+
+      if (hasChatMessageEvents && type !== "step:failed" && type !== "orchestrator:decision") {
+        // When canonical chat events exist, ignore legacy event mirrors to prevent duplicates.
+        continue;
+      }
+
+      if (type === "step:started") {
+        usedEventTimeline = true;
+        const label = typeof payload.label === "string" ? payload.label : payload.stepId;
+        if (typeof label === "string" && label.length > 0) {
+          timeline.push(makeMessage("system", `Starting: ${label}.`, "step_started"));
+        }
+        continue;
+      }
+
+      if (type === "step:completed") {
+        usedEventTimeline = true;
+        const label = typeof payload.label === "string" ? payload.label : payload.stepId;
+        if (typeof label === "string" && label.length > 0) {
+          timeline.push(makeMessage("system", `Completed: ${label}.`, "step_completed"));
+        }
+        continue;
+      }
+
+      if (type === "step:failed") {
+        usedEventTimeline = true;
+        const label = typeof payload.label === "string" ? payload.label : payload.stepId;
+        const reason = typeof payload.reason === "string" ? payload.reason : "Step failed";
+        if (typeof label === "string" && label.length > 0) {
+          timeline.push(makeMessage("error", `Failed: ${label}. ${reason}`, "run_status"));
+        } else {
+          timeline.push(makeMessage("error", reason, "run_status"));
+        }
+        continue;
+      }
+
+      if (type === "orchestrator:decision") {
+        usedEventTimeline = true;
+        const decision = coerceOrchestratorDecisionEvent(payload);
+        if (decision) {
+          timeline.push(makeOrchestratorThinkingMessage(decision));
+        }
+        continue;
+      }
+
+      if (type === "log") {
+        continue;
+      }
+
+      if (type === "selfheal:iteration") {
+        continue;
+      }
+
+      if (type === "execute_sql:statement") {
+        usedEventTimeline = true;
+        timeline.push(makeSqlStatementMessage(payload as ExecuteStatementEvent));
+        continue;
+      }
+
+      if (type === "execute_sql:error") {
+        usedEventTimeline = true;
+        const executeError = payload as ExecuteErrorEvent;
+        const missing =
+          (executeError.errorType ?? "").toLowerCase().includes("missing") ||
+          (executeError.errorMessage ?? "").toLowerCase().includes("does not exist");
+        timeline.push(
+          makeSqlErrorMessage(
+            executeError,
+            missing ? "Execution paused: missing table/object detected." : undefined
+          )
+        );
+        continue;
+      }
+
+      if (type === "run:completed") {
+        usedEventTimeline = true;
+        timeline.push(makeMessage("system", "Migration completed.", "run_status"));
+        continue;
+      }
+
+      if (type === "run:failed") {
+        usedEventTimeline = true;
+        const reason = typeof payload.reason === "string" ? payload.reason : "Run failed";
+        timeline.push(makeMessage("error", reason, "run_status"));
+      }
+    }
+  }
+
+  if (!usedEventTimeline) {
+    return [...timeline, ...buildSqlExecutionMessages(statements, errors)];
+  }
+
+  return timeline;
+}
+
+function buildSupplementalEventMessages(events: unknown): ChatMessage[] {
+  if (!Array.isArray(events)) return [];
+  const out: ChatMessage[] = [];
+  for (const raw of events) {
+    if (!raw || typeof raw !== "object") continue;
+    const event = raw as PersistedRunEvent;
+    const type = typeof event.type === "string" ? event.type : "";
+    const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+
+    if (type === "step:failed") {
+      const label = typeof payload.label === "string" ? payload.label : payload.stepId;
+      const reason = typeof payload.reason === "string" ? payload.reason : "Step failed";
+      out.push(
+        makeMessage(
+          "error",
+          typeof label === "string" && label.length > 0 ? `Failed: ${label}. ${reason}` : reason,
+          "run_status"
+        )
+      );
+      continue;
+    }
+
+    if (type === "orchestrator:decision") {
+      const decision = coerceOrchestratorDecisionEvent(payload);
+      if (decision) out.push(makeOrchestratorThinkingMessage(decision));
+    }
+  }
+  return out;
+}
+
+function buildHydratedTerminalFallback(
+  runId: string,
+  events: unknown,
+  logs: unknown,
+  messages: unknown,
+): TerminalEvent[] {
+  const hydrated: TerminalEvent[] = [];
+  const hasDedicatedTerminalEvents = Array.isArray(events)
+    ? events.some((raw) => {
+      if (!raw || typeof raw !== "object") return false;
+      const event = raw as PersistedRunEvent;
+      return event.type === "terminal:command" || event.type === "terminal:line";
+    })
+    : false;
+
+  if (Array.isArray(events)) {
+    for (const raw of events) {
+      if (!raw || typeof raw !== "object") continue;
+      const event = raw as PersistedRunEvent;
+      const type = typeof event.type === "string" ? event.type : "";
+      const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+
+      if (type === "terminal:command" || type === "terminal:line") {
+        const terminal = coerceTerminalEvent({ type, ...payload }, runId);
+        if (terminal) {
+          hydrated.push(terminal);
+        }
+        continue;
+      }
+
+      if (!hasDedicatedTerminalEvents && type === "log") {
+        const message = typeof payload.message === "string" ? payload.message.trim() : "";
+        if (!message) continue;
+        hydrated.push({
+          type: "terminal:line",
+          runId,
+          ts: new Date().toISOString(),
+          stream: "meta",
+          text: message,
+        });
+      }
+    }
+  }
+
+  if (!hasDedicatedTerminalEvents && Array.isArray(messages)) {
+    for (const row of messages) {
+      if (!isChatMessage(row) || !isTerminalChatKind(row.kind)) continue;
+      const text = row.content.trim();
+      if (!text) continue;
+      hydrated.push({
+        type: "terminal:line",
+        runId,
+        ts: row.ts ?? new Date().toISOString(),
+        stepId: row.step?.id,
+        stream: "meta",
+        text,
+      });
+    }
+  }
+
+  if (!hasDedicatedTerminalEvents && Array.isArray(logs)) {
+    for (const row of logs) {
+      if (typeof row !== "string") continue;
+      const text = row.trim();
+      if (!text) continue;
+      hydrated.push({
+        type: "terminal:line",
+        runId,
+        ts: new Date().toISOString(),
+        stream: "meta",
+        text,
+      });
+    }
+  }
+
+  return hydrated;
 }
 
 /* ================================================================
@@ -106,6 +397,7 @@ export default function SessionsPage() {
   const [isAgentThinking, setIsAgentThinking] = React.useState(false);
   /** Tracks the currently running step to contextualise log messages */
   const activeStepRef = React.useRef<string | null>(null);
+  const chatSchemaReadyRef = React.useRef(false);
 
   const ddlFileInputRef = React.useRef<HTMLInputElement>(null);
   const startRef = React.useRef<number | null>(null);
@@ -117,6 +409,7 @@ export default function SessionsPage() {
   const hydrateRun = React.useCallback(async (targetRunId: string) => {
     setIsBusy(true);
     setError(null);
+    workbenchStore.clearTerminalEvents();
     const res = await fetch(`/api/runs/${targetRunId}`, { cache: "no-store" });
     if (!res.ok) { setError("Unable to load session"); setIsBusy(false); return; }
     const data = await res.json();
@@ -157,13 +450,34 @@ export default function SessionsPage() {
       });
     }
 
-    const baseMessages: ChatMessage[] = Array.isArray(data.logs)
-      ? data.logs
-          .map((l: string) => cleanTerminalOutput(stripLogTags(l)))
-          .filter((l: string) => l.length > 0)
-          .map((l: string) => makeMessage("agent", l))
+    const hydratedMessages = Array.isArray(data.messages)
+      ? data.messages.filter(isChatMessage)
       : [];
-    setMessages([...baseMessages, ...buildSqlExecutionMessages(s, e)]);
+    const splitMessages = splitHydratedMessages(hydratedMessages, targetRunId);
+    const hydratedTerminalFromRun = Array.isArray(data.terminalEvents)
+      ? data.terminalEvents
+        .map((row: unknown) => coerceTerminalEvent(row, targetRunId))
+        .filter((row: TerminalEvent | null): row is TerminalEvent => row !== null)
+      : [];
+    const fallbackTerminal = buildHydratedTerminalFallback(
+      targetRunId,
+      data.events,
+      data.logs,
+      data.messages,
+    );
+    workbenchStore.setTerminalEvents([
+      ...hydratedTerminalFromRun,
+      ...(hydratedTerminalFromRun.length > 0 ? [] : fallbackTerminal),
+      ...(hydratedTerminalFromRun.length > 0 ? [] : splitMessages.terminal),
+    ]);
+
+    if (splitMessages.chat.length > 0) {
+      chatSchemaReadyRef.current = true;
+      setMessages([...splitMessages.chat, ...buildSupplementalEventMessages(data.events)]);
+    } else {
+      chatSchemaReadyRef.current = false;
+      setMessages(buildHydratedMessagesFallback(data.events, data.logs, s, e));
+    }
     if (typeof data.error === "string" && data.error.length) setError(data.error);
     setIsBusy(false);
   }, []);
@@ -174,6 +488,34 @@ export default function SessionsPage() {
       const res = await fetch(`/api/runs/${targetRunId}`, { cache: "no-store" });
       if (!res.ok) return;
       const data = await res.json();
+      const snapshotMessages = Array.isArray(data.messages)
+        ? data.messages.filter(isChatMessage)
+        : [];
+      const splitMessages = splitHydratedMessages(snapshotMessages, targetRunId);
+      const snapshotTerminal = Array.isArray(data.terminalEvents)
+        ? data.terminalEvents
+          .map((row: unknown) => coerceTerminalEvent(row, targetRunId))
+          .filter((row: TerminalEvent | null): row is TerminalEvent => row !== null)
+        : [];
+      const fallbackTerminal = buildHydratedTerminalFallback(
+        targetRunId,
+        data.events,
+        data.logs,
+        data.messages,
+      );
+      workbenchStore.setTerminalEvents([
+        ...snapshotTerminal,
+        ...(snapshotTerminal.length > 0 ? [] : fallbackTerminal),
+        ...(snapshotTerminal.length > 0 ? [] : splitMessages.terminal),
+      ]);
+      if (snapshotMessages.length > 0) {
+        chatSchemaReadyRef.current = true;
+        setMessages([...splitMessages.chat, ...buildSupplementalEventMessages(data.events)]);
+      } else if (!chatSchemaReadyRef.current) {
+        const ss = flattenExecutionLog(data.executionLog);
+        const se: ExecuteErrorEvent[] = Array.isArray(data.executionErrors) ? data.executionErrors : [];
+        setMessages(buildHydratedMessagesFallback(data.events, data.logs, ss, se));
+      }
 
       const nextStatus = typeof data.status === "string" ? data.status : "idle";
       setStatus(nextStatus);
@@ -194,11 +536,6 @@ export default function SessionsPage() {
           status: "Succeeded",
           elapsedMs: startRef.current ? Date.now() - startRef.current : prev.elapsedMs,
         }));
-        setMessages((prev) =>
-          prev.some((m) => m.role === "system" && m.content === "Migration completed.")
-            ? prev
-            : [...prev, makeMessage("system", "Migration completed.")]
-        );
         reloadSidebar();
       }
 
@@ -219,6 +556,7 @@ export default function SessionsPage() {
     setStatus("idle");
     setSteps(STEP_BLUEPRINT);
     setMessages([]);
+    workbenchStore.clearTerminalEvents();
     setExecuteStatements([]);
     setExecuteErrors([]);
     setRequiresDdlUpload(false);
@@ -273,13 +611,14 @@ export default function SessionsPage() {
   const startRun = async (pid?: string, sid?: string, scid?: string, lang?: string) => {
     const activePid = pid ?? projectId;
     const activeSid = sid ?? sourceId;
-    const activeScid = scid ?? schemaId;
-    if (!activePid || !activeSid || !activeScid) return;
+    const activeScid = scid ?? schemaId ?? undefined;
+    if (!activePid || !activeSid) return;
 
     setIsBusy(true);
     setError(null);
     setSteps(STEP_BLUEPRINT);
     setMessages([]);
+    workbenchStore.clearTerminalEvents();
     setExecuteStatements([]);
     setExecuteErrors([]);
     setCurrentExecution({ ...INITIAL_EXECUTION, status: "Running" });
@@ -295,7 +634,12 @@ export default function SessionsPage() {
         sourceLanguage: lang ?? sourceLanguage,
       }),
     });
-    if (!res.ok) { setError("Failed to start run"); setIsBusy(false); return; }
+    if (!res.ok) {
+      const payload = await res.json().catch(() => ({}));
+      setError(typeof payload?.error === "string" ? payload.error : "Failed to start run");
+      setIsBusy(false);
+      return;
+    }
 
     const data = await res.json();
     setRunId(data.runId);
@@ -362,6 +706,7 @@ export default function SessionsPage() {
         ...prev,
         makeMessage("system", `Uploaded DDL (${ddlFile.name}). Resuming from checkpoint.`),
       ]);
+      workbenchStore.clearTerminalEvents();
       setExecuteStatements([]);
       setExecuteErrors([]);
       setRequiresDdlUpload(false);
@@ -423,11 +768,8 @@ export default function SessionsPage() {
       const uploadedSourceId = sourceFileToUpload ? (await uploadSource(data.projectId, sourceFileToUpload)) ?? null : sourceId;
       const uploadedSchemaId = mappingFileToUpload ? (await uploadSchema(data.projectId, mappingFileToUpload)) ?? null : schemaId;
       
-      if (uploadedSourceId && uploadedSchemaId) {
-        await startRun(data.projectId, uploadedSourceId, uploadedSchemaId, wizardLanguage);
-      } else if (uploadedSourceId) {
-        // Schema is optional, proceed without it
-        await startRun(data.projectId, uploadedSourceId, uploadedSchemaId ?? "", wizardLanguage);
+      if (uploadedSourceId) {
+        await startRun(data.projectId, uploadedSourceId, uploadedSchemaId ?? undefined, wizardLanguage);
       } else {
         setError("Uploads incomplete. Please retry attaching files.");
       }
@@ -458,12 +800,38 @@ export default function SessionsPage() {
     if (!runId || !isActive(status)) return;
     const source = new EventSource(`/api/runs/${runId}/stream`);
 
+    source.addEventListener("chat:message", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data);
+      if (!isChatMessage(payload)) return;
+      if (isTerminalChatKind(payload.kind)) {
+        const text = payload.content.trim();
+        if (!text) return;
+        workbenchStore.appendTerminalEvents([
+          {
+            type: "terminal:line",
+            runId,
+            ts: payload.ts ?? new Date().toISOString(),
+            stepId: payload.step?.id,
+            stream: "meta",
+            text,
+          },
+        ]);
+        return;
+      }
+      chatSchemaReadyRef.current = true;
+      setMessages((prev) => [...prev, payload]);
+    });
+
     source.addEventListener("step:started", (event) => {
       const payload = JSON.parse((event as MessageEvent).data);
       activeStepRef.current = payload.stepId ?? null;
       setSteps((prev) => prev.map((s) => (s.id === payload.stepId ? { ...s, status: "running" } : s)));
-      const label = typeof payload?.label === "string" ? payload.label : payload.stepId;
-      if (label) setMessages((prev) => [...prev, makeMessage("system", `Starting: ${label}.`)]);
+      if (!chatSchemaReadyRef.current) {
+        const label = typeof payload?.label === "string" ? payload.label : payload.stepId;
+        if (label) {
+          setMessages((prev) => [...prev, makeMessage("system", `Starting: ${label}.`, "step_started")]);
+        }
+      }
 
       /* Turn on the "thinking" indicator for LLM-heavy steps */
       const thinkingSteps = ["self_heal", "convert_code", "validate"];
@@ -477,7 +845,6 @@ export default function SessionsPage() {
           status: "Running",
           elapsedMs: startRef.current ? Date.now() - startRef.current : prev.elapsedMs,
         }));
-        setMessages((prev) => [...prev, makeMessage("agent", "Running SQL execution.")]);
       }
     });
 
@@ -486,8 +853,37 @@ export default function SessionsPage() {
       activeStepRef.current = null;
       setIsAgentThinking(false);
       setSteps((prev) => prev.map((s) => (s.id === payload.stepId ? { ...s, status: "completed" } : s)));
-      const label = typeof payload?.label === "string" ? payload.label : payload.stepId;
-      if (label) setMessages((prev) => [...prev, makeMessage("system", `Completed: ${label}.`)]);
+      if (!chatSchemaReadyRef.current) {
+        const label = typeof payload?.label === "string" ? payload.label : payload.stepId;
+        if (label) {
+          setMessages((prev) => [...prev, makeMessage("system", `Completed: ${label}.`, "step_completed")]);
+        }
+      }
+    });
+
+    source.addEventListener("step:failed", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data);
+      activeStepRef.current = null;
+      setIsAgentThinking(false);
+      setSteps((prev) => prev.map((s) => (s.id === payload.stepId ? { ...s, status: "failed" } : s)));
+      if (!chatSchemaReadyRef.current) {
+        const label = typeof payload?.label === "string" ? payload.label : payload.stepId;
+        const reason = typeof payload?.reason === "string" ? payload.reason : "Step failed";
+        setMessages((prev) => [
+          ...prev,
+          makeMessage("error", label ? `Failed: ${label}. ${reason}` : reason, "run_status"),
+        ]);
+      }
+    });
+
+    source.addEventListener("orchestrator:decision", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data);
+      const decision = coerceOrchestratorDecisionEvent(payload);
+      if (!decision) return;
+      setMessages((prev) => [...prev, makeOrchestratorThinkingMessage(decision)]);
+      if (decision.resolved_step === "human_review") {
+        setIsAgentThinking(false);
+      }
     });
 
     source.addEventListener("run:completed", () => {
@@ -499,7 +895,10 @@ export default function SessionsPage() {
         status: "Succeeded",
         elapsedMs: startRef.current ? Date.now() - startRef.current : prev.elapsedMs,
       }));
-      setMessages((prev) => [...prev, makeMessage("system", "Migration completed.")]);
+      if (!chatSchemaReadyRef.current) {
+        setMessages((prev) => [...prev, makeMessage("system", "Migration completed.", "run_status")]);
+      }
+      void reconcileRunSnapshot(runId);
       reloadSidebar();
     });
 
@@ -519,28 +918,41 @@ export default function SessionsPage() {
         elapsedMs: startRef.current ? Date.now() - startRef.current : prev.elapsedMs,
       }));
       if (paused) setRequiresDdlUpload(true);
-      setMessages((prev) => [
-        ...prev,
-        makeMessage("error", paused ? `Execution paused: ${reason}` : reason),
-      ]);
+      if (!chatSchemaReadyRef.current) {
+        setMessages((prev) => [...prev, makeMessage("error", paused ? `Execution paused: ${reason}` : reason, "run_status")]);
+      }
+      void reconcileRunSnapshot(runId);
       reloadSidebar();
+    });
+
+    source.addEventListener("terminal:command", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data);
+      const commandEvent = coerceTerminalEvent({ type: "terminal:command", ...payload }, runId);
+      if (!commandEvent) return;
+      workbenchStore.appendTerminalEvents([commandEvent]);
+    });
+
+    source.addEventListener("terminal:line", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data);
+      const lineEvent = coerceTerminalEvent({ type: "terminal:line", ...payload }, runId);
+      if (!lineEvent) return;
+      workbenchStore.appendTerminalEvents([lineEvent]);
     });
 
     source.addEventListener("log", (event) => {
       const payload = JSON.parse((event as MessageEvent).data);
-      if (!payload.message) return;
-
-      const message = cleanTerminalOutput(stripLogTags(payload.message));
+      const message = typeof payload?.message === "string" ? payload.message.trim() : "";
       if (!message) return;
-
-      /* During LLM-heavy steps, surface log messages as "thinking" bubbles */
-      const thinkingSteps = ["self_heal", "convert_code", "validate"];
-      const step = activeStepRef.current;
-      if (step && thinkingSteps.includes(step)) {
-        setMessages((prev) => [...prev, makeThinkingMessage(message)]);
-      } else {
-        setMessages((prev) => [...prev, makeMessage("agent", message)]);
-      }
+      workbenchStore.appendTerminalEvents([
+        {
+          type: "terminal:line",
+          runId,
+          ts: new Date().toISOString(),
+          stepId: typeof activeStepRef.current === "string" ? activeStepRef.current : undefined,
+          stream: "meta",
+          text: message,
+        },
+      ]);
     });
 
     source.addEventListener("selfheal:iteration", (event) => {
@@ -548,12 +960,6 @@ export default function SessionsPage() {
       const iter = Number(payload?.iteration ?? 0);
       if (Number.isFinite(iter)) setSelfHealIteration(iter);
       setIsAgentThinking(true);
-      setMessages((prev) => [
-        ...prev,
-        makeThinkingMessage(
-          `Self-heal iteration ${payload?.iteration ?? "?"}\nAnalyzing execution errors and generating fixes via Snowflake Cortex...`
-        ),
-      ]);
     });
 
     source.addEventListener("execute_sql:statement", (event) => {
@@ -566,7 +972,6 @@ export default function SessionsPage() {
         rowsReturned: payload.rowCount ?? 0,
         status: "Running",
       });
-      setMessages((prev) => [...prev, makeSqlStatementMessage(payload)]);
     });
 
     source.addEventListener("execute_sql:error", (event) => {
@@ -585,10 +990,6 @@ export default function SessionsPage() {
         status: missing ? "Paused" : "Failed",
         elapsedMs: startRef.current ? Date.now() - startRef.current : prev.elapsedMs,
       }));
-      setMessages((prev) => [
-        ...prev,
-        makeSqlErrorMessage(payload, missing ? "Execution paused: missing table/object detected." : undefined),
-      ]);
     });
 
     source.onerror = () => {
@@ -646,4 +1047,3 @@ export default function SessionsPage() {
     </div>
   );
 }
-

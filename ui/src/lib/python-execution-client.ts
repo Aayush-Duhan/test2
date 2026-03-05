@@ -25,10 +25,10 @@ export async function startPythonRun(payload: {
   projectId: string;
   projectName: string;
   sourceId: string;
-  schemaId: string;
+  schemaId?: string;
   sourceLanguage: string;
   sourcePath: string;
-  schemaPath: string;
+  schemaPath?: string;
 }) {
   return request("/v1/runs/start", { method: "POST", body: payload });
 }
@@ -88,20 +88,15 @@ export async function resumePythonRun(payload: {
   });
 }
 
-export async function getPythonRunEvents(runId: string) {
+export async function getPythonRunEvents(runId: string, lastEventId?: string | null) {
+  const headers: Record<string, string> = {
+    "X-Execution-Token": executionToken,
+  };
+  if (lastEventId && lastEventId.trim().length > 0) {
+    headers["Last-Event-ID"] = lastEventId;
+  }
   return fetch(`${baseUrl}/v1/runs/${runId}/events`, {
-    headers: {
-      "X-Execution-Token": executionToken,
-    },
-    cache: "no-store",
-  });
-}
-
-export async function getPythonArtifact(runId: string, name: string) {
-  return fetch(`${baseUrl}/v1/runs/${runId}/artifacts/${encodeURIComponent(name)}`, {
-    headers: {
-      "X-Execution-Token": executionToken,
-    },
+    headers,
     cache: "no-store",
   });
 }

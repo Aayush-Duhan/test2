@@ -4,6 +4,7 @@
  */
 
 import { atom, map, type MapStore, type ReadableAtom, type WritableAtom } from 'nanostores';
+import type { TerminalEvent } from '@/lib/chat-types';
 
 // Types
 export interface File {
@@ -45,6 +46,7 @@ export class WorkbenchStore {
   #unsavedFiles: WritableAtom<Set<string>> = atom(new Set<string>());
   #showWorkbench: WritableAtom<boolean> = atom(false);
   #showTerminal: WritableAtom<boolean> = atom(false);
+  #terminalEvents: WritableAtom<TerminalEvent[]> = atom([]);
   #size = 0;
 
   get files(): MapStore<FileMap> {
@@ -67,6 +69,10 @@ export class WorkbenchStore {
     return this.#showTerminal;
   }
 
+  get terminalEvents(): WritableAtom<TerminalEvent[]> {
+    return this.#terminalEvents;
+  }
+
   get filesCount(): number {
     return this.#size;
   }
@@ -85,6 +91,19 @@ export class WorkbenchStore {
 
   toggleTerminal(value?: boolean): void {
     this.#showTerminal.set(value ?? !this.#showTerminal.get());
+  }
+
+  appendTerminalEvents(events: TerminalEvent[]): void {
+    if (!Array.isArray(events) || events.length === 0) return;
+    this.#terminalEvents.set([...this.#terminalEvents.get(), ...events]);
+  }
+
+  setTerminalEvents(events: TerminalEvent[]): void {
+    this.#terminalEvents.set(Array.isArray(events) ? events : []);
+  }
+
+  clearTerminalEvents(): void {
+    this.#terminalEvents.set([]);
   }
 
   setSelectedFile(filePath: string | undefined): void {
@@ -145,6 +164,7 @@ export class WorkbenchStore {
     this.#unsavedFiles.set(new Set());
     this.#size = 0;
     this.#showWorkbench.set(false);
+    this.clearTerminalEvents();
   }
 
   /**

@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 
 import type { FileMap, EditorDocument } from "@/lib/workbench-store";
+import type { TerminalEvent } from "@/lib/chat-types";
 import { cn } from "@/lib/utils";
 import { FileTree } from "./file-tree";
 import { CodeMirrorEditor } from "./codemirror/CodeMirrorEditor";
@@ -26,6 +27,7 @@ interface EditorPanelProps {
   onFileSave?: () => void;
   onFileReset?: () => void;
   showTerminal?: boolean;
+  terminalEvents?: TerminalEvent[];
   onToggleTerminal?: () => void;
 }
 
@@ -40,6 +42,7 @@ export function EditorPanel({
   onFileSave,
   onFileReset,
   showTerminal = false,
+  terminalEvents = [],
   onToggleTerminal,
 }: EditorPanelProps) {
   const activeFileSegments = React.useMemo(() => {
@@ -87,6 +90,21 @@ export function EditorPanel({
   }, [onFileSave, isStreaming]);
 
   const canSaveOrReset = !!editorDocument && activeFileUnsaved && !isStreaming;
+  const terminalScrollRef = React.useRef<HTMLDivElement>(null);
+  const terminalStickToBottomRef = React.useRef(true);
+
+  const handleTerminalScroll = React.useCallback(() => {
+    const el = terminalScrollRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    terminalStickToBottomRef.current = nearBottom;
+  }, []);
+
+  React.useEffect(() => {
+    const el = terminalScrollRef.current;
+    if (!el || !terminalStickToBottomRef.current) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+  }, [terminalEvents]);
 
   return (
     <div className="flex h-full flex-col">
@@ -234,8 +252,37 @@ export function EditorPanel({
             </button>
           </div>
           <div className="flex-1 p-3 font-mono text-xs text-white/60 overflow-y-auto">
-            <div className="text-green-400">$ Terminal ready (mocked)</div>
-            <div className="text-white/40 mt-1">Waiting for agent commands...</div>
+            <div
+              ref={terminalScrollRef}
+              onScroll={handleTerminalScroll}
+              className="h-full overflow-y-auto pr-1"
+            >
+              {terminalEvents.length === 0 ? (
+                <>
+                  <div className="text-green-400">$ Terminal ready</div>
+                  <div className="text-white/40 mt-1">Waiting for runtime output...</div>
+                </>
+              ) : (
+                terminalEvents.map((event, index) => {
+                  const key = `${event.type}-${event.ts}-${index}`;
+                  if (event.type === "terminal:command") {
+                    return (
+                      <div key={key} className="whitespace-pre-wrap text-green-400">
+                        {`$ ${event.command}`}
+                      </div>
+                    );
+                  }
+
+                  const tone =
+                    event.stream === "stderr" ? "text-red-300" : "text-white/80";
+                  return (
+                    <div key={key} className={`whitespace-pre-wrap ${tone}`}>
+                      {event.text}
+                    </div>
+                  );
+                })
+              )}
+            </div>
           </div>
         </div>
       )}

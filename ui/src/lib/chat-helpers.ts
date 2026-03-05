@@ -9,6 +9,7 @@ import {
   type ChatSqlDetails,
   type ExecuteStatementEvent,
   type ExecuteErrorEvent,
+  type OrchestratorDecisionEvent,
 } from "@/lib/chat-types";
 
 /* ── Predicates ──────────────────────────────────────────── */
@@ -35,7 +36,7 @@ export function sanitizeMessageContent(content: string): string {
 export function makeMessage(
   role: ChatMessageRole,
   content: string,
-  kind: ChatMessageKind = "text",
+  kind: ChatMessageKind = "log",
   sql?: ChatSqlDetails,
 ): ChatMessage {
   return {
@@ -230,4 +231,33 @@ export function buildSqlExecutionMessages(
   });
 
   return out;
+}
+
+export function makeOrchestratorThinkingMessage(
+  payload: OrchestratorDecisionEvent,
+): ChatMessage {
+  const fromStep = typeof payload.from_step === "string" ? payload.from_step : "unknown";
+  const selected = typeof payload.resolved_step === "string"
+    ? payload.resolved_step
+    : typeof payload.selected_step === "string"
+      ? payload.selected_step
+      : "human_review";
+  const confidence = typeof payload.confidence === "number"
+    ? `${Math.round(payload.confidence * 100)}%`
+    : "n/a";
+  const summary = typeof payload.summary === "string" && payload.summary.trim().length > 0
+    ? payload.summary.trim()
+    : `Orchestrator selected ${selected}.`;
+  const reason = typeof payload.reason === "string" && payload.reason.trim().length > 0
+    ? payload.reason.trim()
+    : "";
+  const status = typeof payload.status === "string" ? payload.status : "ok";
+  const statusPrefix = status === "ok" ? "Orchestrator decision" : "Orchestrator fallback";
+  const content = [
+    `${statusPrefix}: ${fromStep} -> ${selected} (confidence: ${confidence})`,
+    summary,
+    reason ? `Reason: ${reason}` : "",
+  ].filter(Boolean).join("\n");
+
+  return makeThinkingMessage(content);
 }

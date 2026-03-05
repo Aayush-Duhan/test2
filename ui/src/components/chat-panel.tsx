@@ -162,12 +162,6 @@ export function ChatPanel({
                 />
               )}
 
-              {runId && !isAgentPhase && !isSessionFinished && (
-                <div className="shrink-0 rounded-2xl border border-blue-400/30 bg-blue-500/10 px-4 py-3 text-sm text-blue-100">
-                  Conversion pipeline is running. Agent chat will be enabled after CLI conversion completes.
-                </div>
-              )}
-
               <MessageList
                 tasks={tasks}
                 messages={messages}
@@ -323,35 +317,42 @@ function NodeLogTimeline({
   const workflow = tasks[0];
   const subtasks = workflow?.subtasks ?? [];
 
-  const stepStatusByTitle = new Map(subtasks.map((step) => [step.title.toLowerCase(), step.status]));
-
-  const hasMarkerMessages = React.useMemo(
-    () => messages.some((m) => parseStepMarker(sanitizeMessageContent(m.content), "Starting")),
+  const stepStatusById = new Map(subtasks.map((step) => [step.id, step.status]));
+  const hasStepMessages = React.useMemo(
+    () => messages.some((m) => m.kind === "step_started" || m.kind === "step_completed"),
     [messages],
   );
 
   return (
     <div className="space-y-3">
-      {!hasMarkerMessages &&
+      {!hasStepMessages &&
         subtasks
           .filter((step) => step.status !== "pending")
           .map((step) => (
             <StepCheckpointCard key={`fallback-${step.id}`} title={step.title} status={step.status} runStatus={runStatus} />
           ))}
 
-      {messages.map((message) => {
-        const text = sanitizeMessageContent(message.content);
-        const started = parseStepMarker(text, "Starting");
+      {messages.map((message, index) => {
+        if (message.kind === "log" || message.kind === "thinking") {
+          return null;
+        }
+        const renderKey = `${message.id}-${message.ts ?? "no-ts"}-${index}`;
 
-        if (started) {
-          const status = stepStatusByTitle.get(started.toLowerCase());
-          return <StepCheckpointCard key={message.id} title={started} status={status} runStatus={runStatus} />;
+        if (message.kind === "step_started" || message.kind === "step_completed") {
+          const title = message.step?.label ?? sanitizeMessageContent(message.content);
+          const statusFromTasks = message.step?.id ? stepStatusById.get(message.step.id) : undefined;
+          const fallbackStatus = message.kind === "step_completed" ? "completed" : "in-progress";
+          return (
+            <StepCheckpointCard
+              key={renderKey}
+              title={title}
+              status={statusFromTasks ?? fallbackStatus}
+              runStatus={runStatus}
+            />
+          );
         }
 
-        const completed = parseStepMarker(text, "Completed");
-        if (completed) return null;
-
-        return <ChatBubble key={message.id} message={message} />;
+        return <ChatBubble key={renderKey} message={message} />;
       })}
     </div>
   );
@@ -387,13 +388,6 @@ function StepCheckpointCard({
     </div>
   );
 }
-
-
-function parseStepMarker(text: string, marker: "Starting" | "Completed"): string | null {
-  const match = text.match(new RegExp(`^${marker}:\\s*(.+?)\\.?$`, "i"));
-  return match?.[1]?.trim() || null;
-}
-
 function ChatBubble({ message: m }: { message: ChatMessage }) {
   const isUser = m.role === "user";
   const isSystem = m.role === "system";
@@ -410,7 +404,7 @@ function ChatBubble({ message: m }: { message: ChatMessage }) {
         <details className={`group max-w-[90%] rounded-2xl px-3 py-2 ${rowClass}`}>
           <summary className="flex cursor-pointer list-none items-center gap-2 text-sm leading-relaxed">
             <ChevronRight className="h-4 w-4 shrink-0 transition-transform group-open:rotate-90" />
-            <span className="font-medium">{cleanTerminalArtifacts(m.content)}</span>
+            <span className="font-medium">{m.content}</span>
           </summary>
           <div className="mt-3 space-y-2 border-t border-white/10 pt-3">
             {m.sql.statement && <SqlBlockSection title="Query" content={m.sql.statement} />}
@@ -434,7 +428,7 @@ function ChatBubble({ message: m }: { message: ChatMessage }) {
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div className={`max-w-[90%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-relaxed ${bubbleClass}`}>
-        {cleanTerminalArtifacts(buildPlainMessageBody(m))}
+        {buildPlainMessageBody(m)}
       </div>
     </div>
   );
@@ -453,23 +447,21 @@ function SqlBlockSection({
     <div>
       <div className="mb-1 flex items-center gap-2">
         <span
-          className={`rounded-full border px-2 py-0.5 text-[11px] ${
-            isError
+          className={`rounded-full border px-2 py-0.5 text-[11px] ${isError
               ? "border-red-400/40 bg-red-500/15 text-red-100"
               : "border-white/20 bg-white/10 text-white/80"
-          }`}
+            }`}
         >
           {title}
         </span>
       </div>
       <pre
-        className={`max-h-52 overflow-auto whitespace-pre-wrap rounded-xl border px-3 py-2 text-xs ${
-          isError
+        className={`max-h-52 overflow-auto whitespace-pre-wrap rounded-xl border px-3 py-2 text-xs ${isError
             ? "border-red-400/30 bg-red-500/10 text-red-100"
             : "border-white/10 bg-black/30 text-white/85"
-        }`}
+          }`}
       >
-        {cleanTerminalArtifacts(content)}
+        {content}
       </pre>
     </div>
   );
@@ -486,28 +478,3 @@ function buildPlainMessageBody(message: ChatMessage): string {
   return chunks.filter((chunk) => chunk.trim().length > 0).join("\n\n");
 }
 
-function cleanTerminalArtifacts(message: string): string {
-  const ansiStripped = message.replace(
-    // Strip ANSI escape codes from terminal streams.
-    /\u001b\[[0-?]*[ -/]*[@-~]/g,
-    "",
-  );
-
-  const cleaned = ansiStripped
-    .split(/\r?\n/)
-    .map((line) =>
-      line
-        // Box-drawing + mojibake characters often emitted by Windows terminal codepages.
-        .replace(/[\u2500-\u257f\u2580-\u259f]/g, " ")
-        .replace(/[À-ÿ]/g, " ")
-        .replace(/[=]{3,}/g, " ")
-        .replace(/[?]{5,}/g, " ")
-        .replace(/\s{2,}/g, " ")
-        .trim(),
-    )
-    .filter((line) => line.length > 0)
-    .filter((line) => !/^[=\-_*~.#|:+`^]+$/.test(line))
-    .join("\n");
-
-  return cleaned;
-}
