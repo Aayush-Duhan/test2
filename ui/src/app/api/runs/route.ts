@@ -101,6 +101,13 @@ export async function POST(request: Request) {
       sourceLanguage: body.sourceLanguage,
       sourcePath: source.filepath,
       schemaPath: schema?.filepath,
+      sfAccount: typeof body.sfAccount === "string" ? body.sfAccount : undefined,
+      sfUser: typeof body.sfUser === "string" ? body.sfUser : undefined,
+      sfRole: typeof body.sfRole === "string" ? body.sfRole : undefined,
+      sfWarehouse: typeof body.sfWarehouse === "string" ? body.sfWarehouse : undefined,
+      sfDatabase: typeof body.sfDatabase === "string" ? body.sfDatabase : undefined,
+      sfSchema: typeof body.sfSchema === "string" ? body.sfSchema : undefined,
+      sfAuthenticator: typeof body.sfAuthenticator === "string" ? body.sfAuthenticator : undefined,
     };
     const response = await startPythonRun(pythonPayload);
 

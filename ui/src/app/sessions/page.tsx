@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import * as React from "react";
 import { useParams, useRouter } from "next/navigation";
@@ -10,11 +10,9 @@ import { ChatPanel } from "@/components/chat-panel";
 import type { StepState } from "@/lib/migration-types";
 import {
   STEP_BLUEPRINT,
-  INITIAL_EXECUTION,
   type ChatMessage,
   type ExecuteStatementEvent,
   type ExecuteErrorEvent,
-  type CurrentExecution,
 } from "@/lib/chat-types";
 import {
   isActive,
@@ -43,10 +41,8 @@ function isChatMessage(value: unknown): value is ChatMessage {
   );
 }
 
-type PersistedRunEvent = {
-  type?: string;
-  payload?: Record<string, unknown>;
-};
+/** Step IDs where the agent performs LLM-heavy work (thinking indicator). */
+const THINKING_STEPS = ["self_heal", "convert_code", "validate"];
 
 function buildHydratedMessagesFallback(
   events: unknown,
@@ -60,14 +56,14 @@ function buildHydratedMessagesFallback(
   if (Array.isArray(events)) {
     const hasChatMessageEvents = events.some((raw) => {
       if (!raw || typeof raw !== "object") return false;
-      const event = raw as PersistedRunEvent;
+      const event = raw as { type?: string; payload?: Record<string, unknown> };
       if (event.type !== "chat:message") return false;
       return isChatMessage(event.payload);
     });
 
     for (const raw of events) {
       if (!raw || typeof raw !== "object") continue;
-      const event = raw as PersistedRunEvent;
+      const event = raw as { type?: string; payload?: Record<string, unknown> };
       const type = typeof event.type === "string" ? event.type : "";
       const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
 
@@ -195,27 +191,20 @@ export default function SessionsPage() {
   const [isBusy, setIsBusy] = React.useState(false);
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
 
-  /* File inputs - kept for backward compatibility with upload functions */
-  const [file, setFile] = React.useState<File | null>(null);
-  const [schemaFile, setSchemaFile] = React.useState<File | null>(null);
-  const [sourceLanguage, setSourceLanguage] = React.useState("Teradata");
-
   /* Sidebar reload â€” bump to tell the sidebar to re-fetch sessions */
   const [selectedSessionId, setSelectedSessionId] = React.useState<string | null>(null);
   const [sidebarReloadKey, setSidebarReloadKey] = React.useState(0);
   const reloadSidebar = React.useCallback(() => setSidebarReloadKey((k) => k + 1), []);
 
-  /* Execution tracking */
+  /* Execution tracking (used for hydration fallback) */
   const [executeStatements, setExecuteStatements] = React.useState<ExecuteStatementEvent[]>([]);
   const [executeErrors, setExecuteErrors] = React.useState<ExecuteErrorEvent[]>([]);
-  const [currentExecution, setCurrentExecution] = React.useState<CurrentExecution>(INITIAL_EXECUTION);
 
   /* DDL-resume state */
   const [requiresDdlUpload, setRequiresDdlUpload] = React.useState(false);
   const [missingObjects, setMissingObjects] = React.useState<string[]>([]);
   const [resumeFromStage, setResumeFromStage] = React.useState("");
   const [lastExecutedFileIndex, setLastExecutedFileIndex] = React.useState(-1);
-  const [selfHealIteration, setSelfHealIteration] = React.useState(0);
 
   /* Thinking state â€” true while the agent is actively processing */
   const [isAgentThinking, setIsAgentThinking] = React.useState(false);
@@ -224,7 +213,6 @@ export default function SessionsPage() {
   const chatSchemaReadyRef = React.useRef(false);
 
   const ddlFileInputRef = React.useRef<HTMLInputElement>(null);
-  const startRef = React.useRef<number | null>(null);
 
   /* â”€â”€ Derived â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
   const tasks = React.useMemo(() => buildTasks(steps, status), [steps, status]);
@@ -254,24 +242,6 @@ export default function SessionsPage() {
     setMissingObjects(Array.isArray(data.missingObjects) ? data.missingObjects : []);
     setResumeFromStage(typeof data.resumeFromStage === "string" ? data.resumeFromStage : "");
     setLastExecutedFileIndex(typeof data.lastExecutedFileIndex === "number" ? data.lastExecutedFileIndex : -1);
-    setSelfHealIteration(typeof data.selfHealIteration === "number" ? data.selfHealIteration : 0);
-
-    if (s.length) {
-      const last = s[s.length - 1];
-      setCurrentExecution({
-        fileIndex: typeof last.fileIndex === "number" ? last.fileIndex : -1,
-        statementIndex: typeof last.statementIndex === "number" ? last.statementIndex : -1,
-        elapsedMs: startRef.current ? Date.now() - startRef.current : 0,
-        rowsReturned: last.rowCount ?? 0,
-        status: data.status === "completed"
-          ? "Succeeded"
-          : data.status === "failed" && Boolean(data.requiresDdlUpload)
-            ? "Paused"
-            : data.status === "failed"
-              ? "Failed"
-              : "Running",
-      });
-    }
 
     const hydratedMessages = Array.isArray(data.messages)
       ? data.messages.filter(isChatMessage)
@@ -319,11 +289,6 @@ export default function SessionsPage() {
       if (nextStatus === "completed") {
         setIsAgentThinking(false);
         activeStepRef.current = null;
-        setCurrentExecution((prev) => ({
-          ...prev,
-          status: "Succeeded",
-          elapsedMs: startRef.current ? Date.now() - startRef.current : prev.elapsedMs,
-        }));
         reloadSidebar();
       }
 
@@ -350,8 +315,6 @@ export default function SessionsPage() {
     setMissingObjects([]);
     setResumeFromStage("");
     setLastExecutedFileIndex(-1);
-    setSelfHealIteration(0);
-    setCurrentExecution(INITIAL_EXECUTION);
     setIsAgentThinking(false);
     activeStepRef.current = null;
     setError(null);
@@ -362,15 +325,12 @@ export default function SessionsPage() {
   }, [router]);
 
   /* â”€â”€ Upload helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
-  const uploadSource = async (pid?: string, f?: File | null) => {
-    const activePid = pid ?? projectId;
-    const activeFile = f ?? file;
-    if (!activePid || !activeFile) return;
+  const uploadSource = async (pid: string, f: File) => {
     setIsBusy(true);
     setError(null);
     const fd = new FormData();
-    fd.append("file", activeFile);
-    const res = await fetch(`/api/projects/${activePid}/source`, { method: "POST", body: fd });
+    fd.append("file", f);
+    const res = await fetch(`/api/projects/${pid}/source`, { method: "POST", body: fd });
     if (!res.ok) { setError("Upload failed"); setIsBusy(false); return; }
     const data = await res.json();
     setSourceId(data.sourceId);
@@ -378,15 +338,12 @@ export default function SessionsPage() {
     return data.sourceId as string;
   };
 
-  const uploadSchema = async (pid?: string, f?: File | null) => {
-    const activePid = pid ?? projectId;
-    const activeFile = f ?? schemaFile;
-    if (!activePid || !activeFile) return;
+  const uploadSchema = async (pid: string, f: File) => {
     setIsBusy(true);
     setError(null);
     const fd = new FormData();
-    fd.append("file", activeFile);
-    const res = await fetch(`/api/projects/${activePid}/schema`, { method: "POST", body: fd });
+    fd.append("file", f);
+    const res = await fetch(`/api/projects/${pid}/schema`, { method: "POST", body: fd });
     if (!res.ok) { setError("Schema upload failed"); setIsBusy(false); return; }
     const data = await res.json();
     setSchemaId(data.schemaId);
@@ -395,7 +352,21 @@ export default function SessionsPage() {
   };
 
   /* â”€â”€ Start / retry run â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
-  const startRun = async (pid?: string, sid?: string, scid?: string, lang?: string) => {
+  const startRun = async (
+    pid?: string,
+    sid?: string,
+    scid?: string,
+    lang?: string,
+    creds?: {
+      sfAccount?: string;
+      sfUser?: string;
+      sfRole?: string;
+      sfWarehouse?: string;
+      sfDatabase?: string;
+      sfSchema?: string;
+      sfAuthenticator?: string;
+    },
+  ) => {
     const activePid = pid ?? projectId;
     const activeSid = sid ?? sourceId;
     const activeScid = scid ?? schemaId ?? undefined;
@@ -407,8 +378,6 @@ export default function SessionsPage() {
     setMessages([]);
     setExecuteStatements([]);
     setExecuteErrors([]);
-    setCurrentExecution({ ...INITIAL_EXECUTION, status: "Running" });
-    startRef.current = Date.now();
 
     const res = await fetch("/api/runs", {
       method: "POST",
@@ -417,7 +386,8 @@ export default function SessionsPage() {
         projectId: activePid,
         sourceId: activeSid,
         schemaId: activeScid,
-        sourceLanguage: lang ?? sourceLanguage,
+        sourceLanguage: lang,
+        ...(creds ?? {}),
       }),
     });
     if (!res.ok) {
@@ -456,8 +426,6 @@ export default function SessionsPage() {
     setMissingObjects([]);
     setResumeFromStage("");
     setLastExecutedFileIndex(-1);
-    setCurrentExecution({ ...INITIAL_EXECUTION, status: "Running" });
-    startRef.current = Date.now();
     setIsBusy(false);
     reloadSidebar();
     router.replace(`/sessions/${data.runId}`);
@@ -498,8 +466,6 @@ export default function SessionsPage() {
       setMissingObjects([]);
       setResumeFromStage("");
       setLastExecutedFileIndex(-1);
-      setCurrentExecution({ ...INITIAL_EXECUTION, status: "Running" });
-      startRef.current = Date.now();
       setIsBusy(false);
       reloadSidebar();
       router.replace(`/sessions/${data.runId}`);
@@ -524,9 +490,8 @@ export default function SessionsPage() {
     const wizardMappingFiles = wizardState.mappingFiles;
     const wizardLanguage = wizardState.sourceLanguage;
     
-    // Get the first source file and mapping file (if any)
-    const sourceFileToUpload = wizardSourceFiles[0]?.file ?? file;
-    const mappingFileToUpload = wizardMappingFiles[0]?.file ?? schemaFile;
+    const sourceFileToUpload = wizardSourceFiles[0]?.file ?? null;
+    const mappingFileToUpload = wizardMappingFiles[0]?.file ?? null;
     
     setIsBusy(true);
     setError(null);
@@ -547,14 +512,21 @@ export default function SessionsPage() {
       const data = await res.json();
       setProjectId(data.projectId);
       setPromptMode("chat");
-      setSourceLanguage(wizardLanguage);
       setMessages((prev) => [...prev, makeMessage("system", `Project created: ${projectName}`)]);
 
-      const uploadedSourceId = sourceFileToUpload ? (await uploadSource(data.projectId, sourceFileToUpload)) ?? null : sourceId;
-      const uploadedSchemaId = mappingFileToUpload ? (await uploadSchema(data.projectId, mappingFileToUpload)) ?? null : schemaId;
+      const uploadedSourceId = sourceFileToUpload ? (await uploadSource(data.projectId, sourceFileToUpload)) ?? null : null;
+      const uploadedSchemaId = mappingFileToUpload ? (await uploadSchema(data.projectId, mappingFileToUpload)) ?? null : null;
       
       if (uploadedSourceId) {
-        await startRun(data.projectId, uploadedSourceId, uploadedSchemaId ?? undefined, wizardLanguage);
+        await startRun(data.projectId, uploadedSourceId, uploadedSchemaId ?? undefined, wizardLanguage, {
+          sfAccount: wizardState.sfAccount,
+          sfUser: wizardState.sfUser,
+          sfRole: wizardState.sfRole,
+          sfWarehouse: wizardState.sfWarehouse,
+          sfDatabase: wizardState.sfDatabase,
+          sfSchema: wizardState.sfSchema,
+          sfAuthenticator: wizardState.sfAuthenticator,
+        });
       } else {
         setError("Uploads incomplete. Please retry attaching files.");
       }
@@ -607,17 +579,8 @@ export default function SessionsPage() {
       }
 
       /* Turn on the "thinking" indicator for LLM-heavy steps */
-      const thinkingSteps = ["self_heal", "convert_code", "validate"];
-      if (thinkingSteps.includes(payload.stepId)) {
+      if (THINKING_STEPS.includes(payload.stepId)) {
         setIsAgentThinking(true);
-      }
-
-      if (payload.stepId === "execute_sql") {
-        setCurrentExecution((prev) => ({
-          ...prev,
-          status: "Running",
-          elapsedMs: startRef.current ? Date.now() - startRef.current : prev.elapsedMs,
-        }));
       }
     });
 
@@ -638,11 +601,6 @@ export default function SessionsPage() {
       setStatus("completed");
       setIsAgentThinking(false);
       activeStepRef.current = null;
-      setCurrentExecution((prev) => ({
-        ...prev,
-        status: "Succeeded",
-        elapsedMs: startRef.current ? Date.now() - startRef.current : prev.elapsedMs,
-      }));
       if (!chatSchemaReadyRef.current) {
         setMessages((prev) => [...prev, makeMessage("system", "Migration completed.", "run_status")]);
       }
@@ -660,11 +618,6 @@ export default function SessionsPage() {
       const paused =
         String(reason).toLowerCase().includes("upload ddl") ||
         String(reason).toLowerCase().includes("missing object");
-      setCurrentExecution((prev) => ({
-        ...prev,
-        status: paused ? "Paused" : "Failed",
-        elapsedMs: startRef.current ? Date.now() - startRef.current : prev.elapsedMs,
-      }));
       if (paused) setRequiresDdlUpload(true);
       if (!chatSchemaReadyRef.current) {
         setMessages((prev) => [...prev, makeMessage("error", paused ? `Execution paused: ${reason}` : reason, "run_status")]);
@@ -678,9 +631,8 @@ export default function SessionsPage() {
       const payload = JSON.parse((event as MessageEvent).data);
       const message = typeof payload?.message === "string" ? payload.message.trim() : "";
       if (!message) return;
-      const thinkingSteps = ["self_heal", "convert_code", "validate"];
       const step = activeStepRef.current;
-      if (step && thinkingSteps.includes(step)) {
+      if (step && THINKING_STEPS.includes(step)) {
         setMessages((prev) => [...prev, makeThinkingMessage(message)]);
       } else {
         setMessages((prev) => [...prev, makeMessage("agent", message, "log")]);
@@ -689,8 +641,6 @@ export default function SessionsPage() {
 
     source.addEventListener("selfheal:iteration", (event) => {
       const payload = JSON.parse((event as MessageEvent).data);
-      const iter = Number(payload?.iteration ?? 0);
-      if (Number.isFinite(iter)) setSelfHealIteration(iter);
       setIsAgentThinking(true);
       if (!chatSchemaReadyRef.current) {
         setMessages((prev) => [
@@ -705,13 +655,6 @@ export default function SessionsPage() {
     source.addEventListener("execute_sql:statement", (event) => {
       const payload = JSON.parse((event as MessageEvent).data) as ExecuteStatementEvent;
       setExecuteStatements((prev) => [...prev, payload]);
-      setCurrentExecution({
-        fileIndex: typeof payload.fileIndex === "number" ? payload.fileIndex : -1,
-        statementIndex: typeof payload.statementIndex === "number" ? payload.statementIndex : -1,
-        elapsedMs: startRef.current ? Date.now() - startRef.current : 0,
-        rowsReturned: payload.rowCount ?? 0,
-        status: "Running",
-      });
     });
 
     source.addEventListener("execute_sql:error", (event) => {
@@ -725,11 +668,6 @@ export default function SessionsPage() {
         const m = (payload.errorMessage ?? "").match(/['\"]([^'\"]+)['\"]/);
         if (m?.[1]) setMissingObjects((prev) => (prev.includes(m[1]) ? prev : [...prev, m[1]]));
       }
-      setCurrentExecution((prev) => ({
-        ...prev,
-        status: missing ? "Paused" : "Failed",
-        elapsedMs: startRef.current ? Date.now() - startRef.current : prev.elapsedMs,
-      }));
     });
 
     source.onerror = () => {
@@ -779,7 +717,6 @@ export default function SessionsPage() {
             isAgentThinking={isAgentThinking}
             onCreateProject={handleConfirm}
             onRetryRun={retryRun}
-            onResetSession={resetToNewSession}
             onPickDdlFile={() => ddlFileInputRef.current?.click()}
           />
         </div>

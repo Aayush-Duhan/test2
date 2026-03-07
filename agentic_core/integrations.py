@@ -133,44 +133,22 @@ def get_snowflake_session(state: MigrationContext):
             resolve_password_from_sources,
             create_snowpark_session,
         )
-        from .snowflake_runtime import MVP_SNOWFLAKE_CONNECTION
 
-        sf_account = (
-            state.sf_account
-            or os.getenv("SNOWFLAKE_ACCOUNT")
-            or MVP_SNOWFLAKE_CONNECTION["account"]
-        ).strip()
-        sf_user = (
-            state.sf_user
-            or os.getenv("SNOWFLAKE_USER")
-            or os.getenv("SNOWFLAKE_USERNAME")
-            or MVP_SNOWFLAKE_CONNECTION["user"]
-        ).strip()
-        sf_role = (
-            state.sf_role
-            or os.getenv("SNOWFLAKE_ROLE")
-            or MVP_SNOWFLAKE_CONNECTION["role"]
-        ).strip()
-        sf_warehouse = (
-            state.sf_warehouse
-            or os.getenv("SNOWFLAKE_WAREHOUSE")
-            or MVP_SNOWFLAKE_CONNECTION["warehouse"]
-        ).strip()
-        sf_database = (
-            state.sf_database
-            or os.getenv("SNOWFLAKE_DATABASE")
-            or MVP_SNOWFLAKE_CONNECTION["database"]
-        ).strip()
-        sf_schema = (
-            state.sf_schema
-            or os.getenv("SNOWFLAKE_SCHEMA")
-            or MVP_SNOWFLAKE_CONNECTION["schema"]
-        ).strip()
-        sf_authenticator = (
-            state.sf_authenticator
-            or os.getenv("SNOWFLAKE_AUTHENTICATOR")
-            or MVP_SNOWFLAKE_CONNECTION["authenticator"]
-        ).strip() or "externalbrowser"
+        sf_account = (state.sf_account or "").strip()
+        sf_user = (state.sf_user or "").strip()
+
+        if not sf_account:
+            logger.error("Snowflake account is required but not provided.")
+            return None
+        if not sf_user:
+            logger.error("Snowflake user is required but not provided.")
+            return None
+
+        sf_role = (state.sf_role or "").strip() or None
+        sf_warehouse = (state.sf_warehouse or "").strip() or None
+        sf_database = (state.sf_database or "").strip() or None
+        sf_schema = (state.sf_schema or "").strip() or None
+        sf_authenticator = (state.sf_authenticator or "").strip() or "externalbrowser"
 
         config = SnowflakeAuthConfig(
             account=sf_account,

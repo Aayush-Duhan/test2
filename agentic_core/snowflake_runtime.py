@@ -1,8 +1,9 @@
 """
-Runtime helpers for Snowflake SQL execution and LLM fixes.
+Runtime helpers for Snowflake SQL execution.
 
-This module centralizes all interactions through ChatSnowflakeCortex so both
-SQL execution and LLM prompting use the same Snowflake session contract.
+This module provides direct Snowflake connection management and SQL execution
+via snowflake-connector-python, along with SQL parsing and error classification
+utilities.
 """
 
 from __future__ import annotations
@@ -10,25 +11,11 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, Tuple, Any
 
-from langchain_core.messages import HumanMessage
+import snowflake.connector
 
-from .snowflake_auth import (
-    SnowflakeAuthConfig,
-    create_snowpark_session,
-)
 from .state import MigrationContext
 
 logger = logging.getLogger(__name__)
-
-MVP_SNOWFLAKE_CONNECTION = {
-    "account": "EYGDS-LND_DNA_AZ_USE2",
-    "user": "AAYUSH@CTPSANDBOX.COM",
-    "authenticator": "externalbrowser",
-    "role": "EY_DNA_SANDBOX_ROLE_DBMIG_POC_RW",
-    "warehouse": "WH_DBMIG_POC_XS",
-    "database": "DBMIG_POC",
-    "schema": "DBMIG_POC",
-}
 
 
 class SQLExecutionError(Exception):
@@ -47,21 +34,23 @@ class SQLExecutionError(Exception):
         self.partial_results = partial_results
 
 
-def build_chat_snowflake_from_context(state: MigrationContext):
-    """Build ChatSnowflakeCortex with an injected Snowpark session."""
-    from langchain_community.chat_models.snowflake import ChatSnowflakeCortex
+def build_snowflake_connection(state: MigrationContext) -> snowflake.connector.SnowflakeConnection:
+    """Build a Snowflake connection from MigrationContext using snowflake-connector-python."""
+    sf_account = (state.sf_account or "").strip()
+    sf_user = (state.sf_user or "").strip()
 
-    sf_account = (state.sf_account or MVP_SNOWFLAKE_CONNECTION["account"]).strip()
-    sf_user = (state.sf_user or MVP_SNOWFLAKE_CONNECTION["user"]).strip()
-    sf_role = (state.sf_role or MVP_SNOWFLAKE_CONNECTION["role"]).strip()
-    sf_warehouse = (state.sf_warehouse or MVP_SNOWFLAKE_CONNECTION["warehouse"]).strip()
-    sf_database = (state.sf_database or MVP_SNOWFLAKE_CONNECTION["database"]).strip()
-    sf_schema = (state.sf_schema or MVP_SNOWFLAKE_CONNECTION["schema"]).strip()
-    sf_authenticator = (
-        state.sf_authenticator or MVP_SNOWFLAKE_CONNECTION["authenticator"]
-    ).strip() or "externalbrowser"
+    if not sf_account:
+        raise ValueError("Snowflake account is required. Please provide it in the connection settings.")
+    if not sf_user:
+        raise ValueError("Snowflake user is required. Please provide it in the connection settings.")
 
-    config = SnowflakeAuthConfig(
+    sf_role = (state.sf_role or "").strip() or None
+    sf_warehouse = (state.sf_warehouse or "").strip() or None
+    sf_database = (state.sf_database or "").strip() or None
+    sf_schema = (state.sf_schema or "").strip() or None
+    sf_authenticator = (state.sf_authenticator or "").strip() or "externalbrowser"
+
+    return snowflake.connector.connect(
         account=sf_account,
         user=sf_user,
         role=sf_role,
@@ -69,9 +58,8 @@ def build_chat_snowflake_from_context(state: MigrationContext):
         database=sf_database,
         schema=sf_schema,
         authenticator=sf_authenticator,
+        client_store_temporary_credential=True,
     )
-    session = create_snowpark_session(config, password=None)
-    return ChatSnowflakeCortex(session=session)
 
 
 def split_sql_statements(sql_text: str) -> List[str]:
@@ -149,49 +137,53 @@ def classify_snowflake_error(error_message: str) -> Tuple[str, str]:
     return "execution_error", ""
 
 
-def execute_sql_with_chat_runtime(chat_model, sql_text: str) -> List[Dict[str, Any]]:
-    """Execute SQL text statement-by-statement via chat_model.session.sql."""
+def execute_sql_statements(connection, sql_text: str) -> List[Dict[str, Any]]:
+    """Execute SQL text statement-by-statement via snowflake.connector cursor."""
     results: List[Dict[str, Any]] = []
     statements = split_sql_statements(sql_text)
-    for idx, statement in enumerate(statements):
-        try:
-            rows = chat_model.session.sql(statement).collect()
-            preview_rows: List[Any] = []
-            for row in rows[:5]:
-                if hasattr(row, "as_dict"):
-                    preview_rows.append(row.as_dict())
-                else:
-                    preview_rows.append(str(row))
-            results.append(
-                {
-                    "statement_index": idx,
-                    "status": "success",
-                    "statement": statement,
-                    "row_count": len(rows),
-                    "output_preview": preview_rows,
-                }
-            )
-        except Exception as exc:
-            raise SQLExecutionError(
-                message=str(exc),
-                statement=statement,
-                statement_index=idx,
-                partial_results=results,
-            ) from exc
+    cursor = connection.cursor()
+    try:
+        for idx, statement in enumerate(statements):
+            try:
+                cursor.execute(statement)
+                rows = cursor.fetchall()
+                col_names = (
+                    [desc[0] for desc in cursor.description]
+                    if cursor.description
+                    else []
+                )
+                preview_rows: List[Any] = []
+                for row in rows[:5]:
+                    if col_names:
+                        preview_rows.append(dict(zip(col_names, row)))
+                    else:
+                        preview_rows.append(str(row))
+                results.append(
+                    {
+                        "statement_index": idx,
+                        "status": "success",
+                        "statement": statement,
+                        "row_count": cursor.rowcount,
+                        "output_preview": preview_rows,
+                    }
+                )
+            except Exception as exc:
+                raise SQLExecutionError(
+                    message=str(exc),
+                    statement=statement,
+                    statement_index=idx,
+                    partial_results=results,
+                ) from exc
+    finally:
+        cursor.close()
     return results
 
 
-def llm_fix_with_chat_runtime(chat_model, prompt: str) -> str:
-    """Generate a fix using ChatSnowflakeCortex invoke path."""
-    response = chat_model.invoke([HumanMessage(content=prompt)])
-    return str(response.content or "").strip()
-
-
-def close_runtime(chat_model) -> None:
-    """Close underlying Snowflake session if available."""
+def close_connection(connection) -> None:
+    """Close Snowflake connection if available."""
     try:
-        session = getattr(chat_model, "session", None)
-        if session is not None:
-            session.close()
+        if connection is not None:
+            connection.close()
     except Exception as exc:
-        logger.warning("Failed to close runtime session cleanly: %s", exc)
+        logger.warning("Failed to close Snowflake connection cleanly: %s", exc)
+

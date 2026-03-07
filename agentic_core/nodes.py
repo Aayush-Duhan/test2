@@ -470,9 +470,9 @@ def apply_uploaded_ddl_and_resume(state: MigrationContext) -> MigrationContext:
 
     try:
         from .snowflake_runtime import (
-            build_chat_snowflake_from_context,
-            execute_sql_with_chat_runtime,
-            close_runtime,
+            build_snowflake_connection,
+            execute_sql_statements,
+            close_connection,
         )
 
         with open(state.ddl_upload_path, "r", encoding="utf-8-sig") as ddl_file:
@@ -485,11 +485,11 @@ def apply_uploaded_ddl_and_resume(state: MigrationContext) -> MigrationContext:
             log_event(state, "warning", "Uploaded DDL file is empty")
             return state
 
-        chat_model = build_chat_snowflake_from_context(state)
+        connection = build_snowflake_connection(state)
         try:
-            execute_sql_with_chat_runtime(chat_model, ddl_sql)
+            execute_sql_statements(connection, ddl_sql)
         finally:
-            close_runtime(chat_model)
+            close_connection(connection)
 
         state.requires_ddl_upload = False
         state.ddl_upload_path = ""
@@ -510,7 +510,7 @@ def apply_uploaded_ddl_and_resume(state: MigrationContext) -> MigrationContext:
 
 
 def execute_sql_node(state: MigrationContext) -> MigrationContext:
-    """Execute converted SQL files in Snowflake via ChatSnowflakeCortex session."""
+    """Execute converted SQL files in Snowflake via snowflake-connector-python."""
     if is_error_state(state):
         return state
 
@@ -529,13 +529,13 @@ def execute_sql_node(state: MigrationContext) -> MigrationContext:
 
     try:
         from .snowflake_runtime import (
-            build_chat_snowflake_from_context,
-            execute_sql_with_chat_runtime,
+            build_snowflake_connection,
+            execute_sql_statements,
             classify_snowflake_error,
-            close_runtime,
+            close_connection,
         )
 
-        chat_model = build_chat_snowflake_from_context(state)
+        connection = build_snowflake_connection(state)
         try:
             if sql_files:
                 start_index = max(0, state.last_executed_file_index + 1)
@@ -550,7 +550,7 @@ def execute_sql_node(state: MigrationContext) -> MigrationContext:
                         state.last_executed_file_index = index
                         continue
 
-                    statement_results = execute_sql_with_chat_runtime(chat_model, sql_text)
+                    statement_results = execute_sql_statements(connection, sql_text)
                     state.execution_log.append(
                         {
                             "file": sql_file,
@@ -561,7 +561,7 @@ def execute_sql_node(state: MigrationContext) -> MigrationContext:
                     )
                     state.last_executed_file_index = index
             elif state.converted_code.strip():
-                statement_results = execute_sql_with_chat_runtime(chat_model, state.converted_code)
+                statement_results = execute_sql_statements(connection, state.converted_code)
                 state.execution_log.append(
                     {
                         "file": "in_memory_converted_code",
@@ -574,7 +574,7 @@ def execute_sql_node(state: MigrationContext) -> MigrationContext:
             else:
                 raise ValueError("No converted SQL files or converted_code found for execution.")
         finally:
-            close_runtime(chat_model)
+            close_connection(connection)
 
         state.execution_passed = True
         state.execution_errors = []

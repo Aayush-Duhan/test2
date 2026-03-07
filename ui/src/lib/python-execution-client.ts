@@ -29,6 +29,13 @@ export async function startPythonRun(payload: {
   sourceLanguage: string;
   sourcePath: string;
   schemaPath?: string;
+  sfAccount?: string;
+  sfUser?: string;
+  sfRole?: string;
+  sfWarehouse?: string;
+  sfDatabase?: string;
+  sfSchema?: string;
+  sfAuthenticator?: string;
 }) {
   return request("/v1/runs/start", { method: "POST", body: payload });
 }

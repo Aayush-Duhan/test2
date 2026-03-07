@@ -13,22 +13,8 @@ import {
 
 /* ── Predicates ──────────────────────────────────────────── */
 
-export const isTerminal = (s: string) =>
-  ["completed", "failed", "canceled"].includes(s);
-
 export const isActive = (s: string) =>
   ["running", "queued"].includes(s);
-
-/* ── Text helpers ────────────────────────────────────────── */
-
-export function sanitizeMessageContent(content: string): string {
-  const trimmed = content.trim();
-  const withoutTimePrefix = trimmed.replace(
-    /^\[\d{1,2}:\d{2}(?::\d{2})?\]\s*/,
-    "",
-  );
-  return withoutTimePrefix.length > 0 ? withoutTimePrefix : trimmed;
-}
 
 /* ── Message factories ───────────────────────────────────── */
 
@@ -42,7 +28,7 @@ export function makeMessage(
     id:
       globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
     role,
-    content: sanitizeMessageContent(content),
+    content: content.trim(),
     kind,
     sql,
   };

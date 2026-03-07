@@ -58,6 +58,7 @@ export const WIZARD_STEPS = [
   { id: 'scriptType', label: 'Script Type', description: 'Select script types to convert' },
   { id: 'files', label: 'Source Files', description: 'Upload your SQL files' },
   { id: 'mapping', label: 'Schema Mapping', description: 'Upload schema mapping files' },
+  { id: 'credentials', label: 'Snowflake Connection', description: 'Provide Snowflake credentials' },
   { id: 'summary', label: 'Summary', description: 'Review and start migration' },
 ] as const;
 
@@ -87,8 +88,17 @@ export interface WizardState {
   
   // Step 4: Schema Mapping
   mappingFiles: WizardFile[];
+
+  // Step 5: Snowflake Credentials
+  sfAccount: string;
+  sfUser: string;
+  sfRole: string;
+  sfWarehouse: string;
+  sfDatabase: string;
+  sfSchema: string;
+  sfAuthenticator: 'externalbrowser' | 'snowflake';
   
-  // Step 5: Summary
+  // Step 6: Summary
   isStarting: boolean;
   startError?: string;
 }
@@ -101,6 +111,13 @@ const initialState: WizardState = {
   scriptTypes: [],
   sourceFiles: [],
   mappingFiles: [],
+  sfAccount: '',
+  sfUser: '',
+  sfRole: '',
+  sfWarehouse: '',
+  sfDatabase: '',
+  sfSchema: '',
+  sfAuthenticator: 'externalbrowser',
   isStarting: false,
 };
 
@@ -205,6 +222,14 @@ export function removeMappingFile(fileKey: string) {
   notifyListeners();
 }
 
+export function setCredentialField(
+  field: 'sfAccount' | 'sfUser' | 'sfRole' | 'sfWarehouse' | 'sfDatabase' | 'sfSchema' | 'sfAuthenticator',
+  value: string,
+) {
+  state = { ...state, [field]: value };
+  notifyListeners();
+}
+
 export function setStarting(isStarting: boolean, error?: string) {
   state = { ...state, isStarting, startError: error };
   notifyListeners();
@@ -278,6 +303,8 @@ export function canProceedToNext(): boolean {
     case 'mapping':
       // Mapping is optional
       return true;
+    case 'credentials':
+      return currentState.sfAccount.trim().length > 0 && currentState.sfUser.trim().length > 0;
     case 'summary':
       return !currentState.isStarting;
     default:

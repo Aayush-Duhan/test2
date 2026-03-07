@@ -63,16 +63,6 @@ export type ChatMessage = {
   sql?: ChatSqlDetails;
 };
 
-/* ── Execution tracker ───────────────────────────────────── */
-
-export type CurrentExecution = {
-  fileIndex: number;
-  statementIndex: number;
-  elapsedMs: number;
-  rowsReturned: number;
-  status: "Idle" | "Running" | "Succeeded" | "Failed" | "Paused";
-};
-
 /* ── Step blueprint ──────────────────────────────────────── */
 
 export const STEP_BLUEPRINT: StepState[] = [
@@ -86,14 +76,6 @@ export const STEP_BLUEPRINT: StepState[] = [
   { id: "human_review", label: "Human review", status: "pending" },
   { id: "finalize", label: "Finalize output", status: "pending" },
 ];
-
-export const INITIAL_EXECUTION: CurrentExecution = {
-  fileIndex: -1,
-  statementIndex: -1,
-  elapsedMs: 0,
-  rowsReturned: 0,
-  status: "Idle",
-};
 
 export const STATUS_MAP: Record<string, string> = {
   pending: "pending",

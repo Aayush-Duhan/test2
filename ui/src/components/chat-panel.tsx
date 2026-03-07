@@ -5,7 +5,6 @@ import { ChevronRight } from "lucide-react";
 import { PromptBox } from "@/components/ui/chatgpt-prompt-input";
 import type { Task } from "@/components/ui/agent-plan";
 import { SidebarInset } from "@/components/ui/sidebar";
-import { sanitizeMessageContent } from "@/lib/chat-helpers";
 import type { ChatMessage } from "@/lib/chat-types";
 import { SetupWizard } from "@/components/ui/setup-wizard";
 import { Workbench } from "@/components/workbench";
@@ -28,7 +27,6 @@ interface ChatPanelProps {
   uploadedFiles?: UploadedFile[];
   onCreateProject: () => void;
   onRetryRun: () => void;
-  onResetSession: () => void;
   onPickDdlFile: () => void;
   onSendAgentMessage?: (message: string) => void;
 }
@@ -301,7 +299,7 @@ function MessageList({
       {error && (
         <div className="mt-3 flex justify-start">
           <div className="max-w-[90%] whitespace-pre-wrap rounded-2xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm leading-relaxed text-red-100">
-            {sanitizeMessageContent(error)}
+            {error}
           </div>
         </div>
       )}
@@ -340,7 +338,7 @@ function NodeLogTimeline({
         const renderKey = `${message.id}-${message.ts ?? "no-ts"}-${index}`;
 
         if (message.kind === "step_started" || message.kind === "step_completed") {
-          const title = message.step?.label ?? sanitizeMessageContent(message.content);
+          const title = message.step?.label ?? message.content;
           const statusFromTasks = message.step?.id ? stepStatusById.get(message.step.id) : undefined;
           const fallbackStatus = message.kind === "step_completed" ? "completed" : "in-progress";
           return (
