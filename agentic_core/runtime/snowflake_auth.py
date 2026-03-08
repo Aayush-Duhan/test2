@@ -1,15 +1,10 @@
-"""
-Shared Snowflake authentication helpers.
-
-This module centralizes Snowflake auth configuration and session creation.
-It intentionally keeps secrets out of MigrationContext and persisted storage.
-"""
+"""Shared Snowflake authentication helpers."""
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Optional, Mapping, Dict, Any
+from typing import Any, Dict, Mapping, Optional
 
 
 @dataclass(frozen=True)
@@ -20,7 +15,7 @@ class SnowflakeAuthConfig:
     warehouse: str = ""
     database: str = ""
     schema: str = ""
-    authenticator: str = "externalbrowser"  # "externalbrowser" or "snowflake"
+    authenticator: str = "externalbrowser"
 
     def to_connection_parameters(self) -> Dict[str, Any]:
         params: Dict[str, Any] = {
@@ -45,16 +40,7 @@ def resolve_password_from_sources(
     secrets: Optional[Mapping[str, Any]] = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> Optional[str]:
-    """
-    Resolve the Snowflake password from allowed sources.
-
-    Priority:
-      1) explicit_password (e.g., UI input in-memory)
-      2) secrets["SNOWFLAKE_PASSWORD"] or secrets["snowflake"]["password"]
-      3) environment variables
-
-    Returns None when authenticator does not require a password.
-    """
+    """Resolve the Snowflake password from allowed sources."""
     if authenticator != "snowflake":
         return None
 
@@ -62,10 +48,8 @@ def resolve_password_from_sources(
         return explicit_password
 
     if secrets:
-        # Flat secret
         if isinstance(secrets, Mapping) and "SNOWFLAKE_PASSWORD" in secrets:
             return str(secrets["SNOWFLAKE_PASSWORD"])
-        # Nested secret
         snowflake_block = secrets.get("snowflake") if isinstance(secrets, Mapping) else None
         if isinstance(snowflake_block, Mapping) and "password" in snowflake_block:
             return str(snowflake_block["password"])
@@ -82,9 +66,7 @@ def create_snowpark_session(
     config: SnowflakeAuthConfig,
     password: Optional[str] = None,
 ) -> "Session":
-    """
-    Create a Snowpark Session from the shared auth config.
-    """
+    """Create a Snowpark Session from the shared auth config."""
     from snowflake.snowpark import Session
 
     params = config.to_connection_parameters()

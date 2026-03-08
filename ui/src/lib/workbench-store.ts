@@ -33,6 +33,12 @@ export interface UploadedFile {
   isBinary?: boolean;
 }
 
+export interface TerminalLine {
+  text: string;
+  isProgress: boolean;
+  ts: number;
+}
+
 const WORK_DIR = '/project';
 
 /**
@@ -40,11 +46,12 @@ const WORK_DIR = '/project';
  */
 export class WorkbenchStore {
   #files: MapStore<FileMap> = map({});
-  #savedFiles: Map<string, string> = new Map(); // Tracks original/saved content for reset
+  #savedFiles: Map<string, string> = new Map();
   #selectedFile: WritableAtom<string | undefined> = atom(undefined);
   #unsavedFiles: WritableAtom<Set<string>> = atom(new Set<string>());
   #showWorkbench: WritableAtom<boolean> = atom(false);
   #showTerminal: WritableAtom<boolean> = atom(false);
+  #terminalLines: WritableAtom<TerminalLine[]> = atom<TerminalLine[]>([]);
   #size = 0;
 
   get files(): MapStore<FileMap> {
@@ -67,6 +74,10 @@ export class WorkbenchStore {
     return this.#showTerminal;
   }
 
+  get terminalLines(): WritableAtom<TerminalLine[]> {
+    return this.#terminalLines;
+  }
+
   get filesCount(): number {
     return this.#size;
   }
@@ -85,6 +96,25 @@ export class WorkbenchStore {
 
   toggleTerminal(value?: boolean): void {
     this.#showTerminal.set(value ?? !this.#showTerminal.get());
+  }
+
+  appendTerminalLine(text: string, isProgress: boolean): void {
+    const prev = this.#terminalLines.get();
+    const entry: TerminalLine = { text, isProgress, ts: Date.now() };
+    if (isProgress && prev.length > 0 && prev[prev.length - 1].isProgress) {
+      const updated = [...prev];
+      updated[updated.length - 1] = entry;
+      this.#terminalLines.set(updated);
+    } else {
+      this.#terminalLines.set([...prev, entry]);
+    }
+    if (!this.#showTerminal.get()) {
+      this.#showTerminal.set(true);
+    }
+  }
+
+  clearTerminal(): void {
+    this.#terminalLines.set([]);
   }
 
   setSelectedFile(filePath: string | undefined): void {
@@ -143,6 +173,7 @@ export class WorkbenchStore {
     this.#savedFiles.clear();
     this.#selectedFile.set(undefined);
     this.#unsavedFiles.set(new Set());
+    this.#terminalLines.set([]);
     this.#size = 0;
     this.#showWorkbench.set(false);
   }

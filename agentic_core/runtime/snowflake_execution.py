@@ -1,19 +1,11 @@
-"""
-Runtime helpers for Snowflake SQL execution.
-
-This module provides direct Snowflake connection management and SQL execution
-via snowflake-connector-python, along with SQL parsing and error classification
-utilities.
-"""
+"""Runtime helpers for Snowflake SQL execution."""
 
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Tuple, Any
+from typing import Any, Callable, Dict, List, Tuple
 
-import snowflake.connector
-
-from .state import MigrationContext
+from agentic_core.models.context import MigrationContext
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +26,12 @@ class SQLExecutionError(Exception):
         self.partial_results = partial_results
 
 
-def build_snowflake_connection(state: MigrationContext) -> snowflake.connector.SnowflakeConnection:
-    """Build a Snowflake connection from MigrationContext using snowflake-connector-python."""
+def build_snowflake_connection(
+    state: MigrationContext,
+) -> Any:
+    """Build a Snowflake connection from MigrationContext."""
+    import snowflake.connector
+
     sf_account = (state.sf_account or "").strip()
     sf_user = (state.sf_user or "").strip()
 
@@ -63,12 +59,7 @@ def build_snowflake_connection(state: MigrationContext) -> snowflake.connector.S
 
 
 def split_sql_statements(sql_text: str) -> List[str]:
-    """
-    Split SQL into statements while respecting quoted strings.
-
-    This is a lightweight splitter that handles semicolons outside of single
-    and double quotes, and respects $$...$$ blocks used in SQL procedures.
-    """
+    """Split SQL into statements while respecting quoted strings."""
     statements: List[str] = []
     buf: List[str] = []
     in_single = False
@@ -137,8 +128,12 @@ def classify_snowflake_error(error_message: str) -> Tuple[str, str]:
     return "execution_error", ""
 
 
-def execute_sql_statements(connection, sql_text: str) -> List[Dict[str, Any]]:
-    """Execute SQL text statement-by-statement via snowflake.connector cursor."""
+def execute_sql_statements(
+    connection,
+    sql_text: str,
+    on_statement: Callable[[Dict[str, Any]], None] | None = None,
+) -> List[Dict[str, Any]]:
+    """Execute SQL text statement-by-statement via snowflake.connector."""
     results: List[Dict[str, Any]] = []
     statements = split_sql_statements(sql_text)
     cursor = connection.cursor()
@@ -147,26 +142,26 @@ def execute_sql_statements(connection, sql_text: str) -> List[Dict[str, Any]]:
             try:
                 cursor.execute(statement)
                 rows = cursor.fetchall()
-                col_names = (
-                    [desc[0] for desc in cursor.description]
-                    if cursor.description
-                    else []
-                )
+                col_names = [desc[0] for desc in cursor.description] if cursor.description else []
                 preview_rows: List[Any] = []
                 for row in rows[:5]:
                     if col_names:
                         preview_rows.append(dict(zip(col_names, row)))
                     else:
                         preview_rows.append(str(row))
-                results.append(
-                    {
-                        "statement_index": idx,
-                        "status": "success",
-                        "statement": statement,
-                        "row_count": cursor.rowcount,
-                        "output_preview": preview_rows,
-                    }
-                )
+                result_entry = {
+                    "statement_index": idx,
+                    "status": "success",
+                    "statement": statement,
+                    "row_count": cursor.rowcount,
+                    "output_preview": preview_rows,
+                }
+                results.append(result_entry)
+                if on_statement is not None:
+                    try:
+                        on_statement(result_entry)
+                    except Exception:
+                        pass
             except Exception as exc:
                 raise SQLExecutionError(
                     message=str(exc),
@@ -186,4 +181,3 @@ def close_connection(connection) -> None:
             connection.close()
     except Exception as exc:
         logger.warning("Failed to close Snowflake connection cleanly: %s", exc)
-

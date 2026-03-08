@@ -6,7 +6,7 @@ from typing import Any, TypedDict
 
 from pydantic import BaseModel
 
-from agentic_core.state import MigrationContext
+from agentic_core.models.context import MigrationContext
 
 
 # ── Pydantic request / response models ──────────────────────────

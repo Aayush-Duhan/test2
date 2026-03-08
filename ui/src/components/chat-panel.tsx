@@ -1,9 +1,9 @@
 "use client";
 
 import * as React from "react";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, Terminal } from "lucide-react";
 import { PromptBox } from "@/components/ui/chatgpt-prompt-input";
-import type { Task } from "@/components/ui/agent-plan";
+import AgentPlan, { type Task } from "@/components/ui/agent-plan";
 import { SidebarInset } from "@/components/ui/sidebar";
 import type { ChatMessage } from "@/lib/chat-types";
 import { SetupWizard } from "@/components/ui/setup-wizard";
@@ -147,13 +147,38 @@ export function ChatPanel({
     };
   }, [projectId, runId, status, syncProjectFiles]);
 
+  const chatMessages = React.useMemo(
+    () => messages.filter((m) => m.kind !== "step_started" && m.kind !== "step_completed" && m.kind !== "log" && m.kind !== "terminal_progress"),
+    [messages],
+  );
+
+  const openTerminal = React.useCallback(() => {
+    workbenchStore.setShowWorkbench(true);
+    workbenchStore.toggleTerminal(true);
+  }, []);
+
   return (
     <div className="flex min-h-0 flex-1 overflow-hidden">
       <SidebarInset className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#1a1a1a]">
-        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden p-4">
-          {runId ? (
-            <>
-              {requiresDdlUpload && (
+        {runId ? (
+          <>
+            {/* Agent Plan — compact progress tracker */}
+            <div className="shrink-0 p-4 pb-0">
+              <AgentPlan tasks={tasks} readOnly />
+              <div className="mt-2 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={openTerminal}
+                  className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white/60 hover:bg-white/10 hover:text-white/90 transition-colors"
+                >
+                  <Terminal className="h-3.5 w-3.5" />
+                  View Terminal Output
+                </button>
+              </div>
+            </div>
+
+            {requiresDdlUpload && (
+              <div className="shrink-0 px-4 pt-3">
                 <DdlUploadBanner
                   isBusy={isBusy}
                   resumeFromStage={resumeFromStage}
@@ -162,26 +187,25 @@ export function ChatPanel({
                   onPickDdlFile={onPickDdlFile}
                   onRetryRun={onRetryRun}
                 />
-              )}
+              </div>
+            )}
 
-              <MessageList
-                tasks={tasks}
-                messages={messages}
-                error={error}
-                status={status}
-                isAgentThinking={isAgentThinking}
-              />
-            </>
-          ) : isHydratingRun ? (
-            <div className="flex flex-1 items-center justify-center">
-              <div className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/70">Loading session...</div>
-            </div>
-          ) : (
-            <div className="flex flex-1 items-center justify-center">
-              <SetupWizard onStartMigration={onCreateProject} isBusy={isBusy} />
-            </div>
-          )}
-        </div>
+            {/* Chat messages area */}
+            <ChatMessageArea
+              messages={chatMessages}
+              error={error}
+              isAgentThinking={isAgentThinking}
+            />
+          </>
+        ) : isHydratingRun ? (
+          <div className="flex flex-1 items-center justify-center">
+            <div className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/70">Loading session...</div>
+          </div>
+        ) : (
+          <div className="flex flex-1 items-center justify-center">
+            <SetupWizard onStartMigration={onCreateProject} isBusy={isBusy} />
+          </div>
+        )}
 
         {hasActiveRun && (
           <div className="shrink-0 border-t border-white/10 px-4 py-3">
@@ -195,9 +219,7 @@ export function ChatPanel({
               disabled={!isChatInputEnabled}
               isSending={isChatInputEnabled && isBusy}
             />
-
             {chatInputHint && <p className="mt-2 px-1 text-xs text-white/60">{chatInputHint}</p>}
-
           </div>
         )}
       </SidebarInset>
@@ -258,17 +280,13 @@ function DdlUploadBanner({
   );
 }
 
-function MessageList({
-  tasks,
+function ChatMessageArea({
   messages,
   error,
-  status,
   isAgentThinking = false,
 }: {
-  tasks: Task[];
   messages: ChatMessage[];
   error: string | null;
-  status: string;
   isAgentThinking?: boolean;
 }) {
   const scrollRef = React.useRef<HTMLDivElement>(null);
@@ -282,111 +300,41 @@ function MessageList({
     }
   }, [messages, isAgentThinking]);
 
+  const hasContent = messages.length > 0 || isAgentThinking || error;
+
   return (
-    <div ref={scrollRef} className="scrollbar-dark flex min-h-0 flex-1 flex-col overflow-y-auto px-1 py-2">
-      {messages.length === 0 ? (
-        <p className="text-sm text-white/50">Flow updates will appear here once the migration starts.</p>
+    <div ref={scrollRef} className="scrollbar-dark flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-3">
+      {!hasContent ? (
+        <div className="flex flex-1 items-center justify-center">
+          <p className="text-sm text-white/40">Chat messages will appear here. Terminal output is in the workbench panel.</p>
+        </div>
       ) : (
-        <NodeLogTimeline messages={messages} tasks={tasks} runStatus={status} />
-      )}
-
-      {isAgentThinking && (
-        <div className="mt-3 flex justify-start">
-          <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/70">Agent is working...</div>
-        </div>
-      )}
-
-      {error && (
-        <div className="mt-3 flex justify-start">
-          <div className="max-w-[90%] whitespace-pre-wrap rounded-2xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm leading-relaxed text-red-100">
-            {error}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function NodeLogTimeline({
-  messages,
-  tasks,
-  runStatus,
-}: {
-  messages: ChatMessage[];
-  tasks: Task[];
-  runStatus: string;
-}) {
-  const workflow = tasks[0];
-  const subtasks = workflow?.subtasks ?? [];
-
-  const stepStatusById = new Map(subtasks.map((step) => [step.id, step.status]));
-  const hasStepMessages = React.useMemo(
-    () => messages.some((m) => m.kind === "step_started" || m.kind === "step_completed"),
-    [messages],
-  );
-
-  return (
-    <div className="space-y-3">
-      {!hasStepMessages &&
-        subtasks
-          .filter((step) => step.status !== "pending")
-          .map((step) => (
-            <StepCheckpointCard key={`fallback-${step.id}`} title={step.title} status={step.status} runStatus={runStatus} />
+        <div className="space-y-3">
+          {messages.map((m, i) => (
+            <ChatBubble key={`${m.id}-${i}`} message={m} />
           ))}
 
-      {messages.map((message, index) => {
-        const renderKey = `${message.id}-${message.ts ?? "no-ts"}-${index}`;
+          {isAgentThinking && (
+            <div className="flex justify-start">
+              <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/70">
+                Agent is working...
+              </div>
+            </div>
+          )}
 
-        if (message.kind === "step_started" || message.kind === "step_completed") {
-          const title = message.step?.label ?? message.content;
-          const statusFromTasks = message.step?.id ? stepStatusById.get(message.step.id) : undefined;
-          const fallbackStatus = message.kind === "step_completed" ? "completed" : "in-progress";
-          return (
-            <StepCheckpointCard
-              key={renderKey}
-              title={title}
-              status={statusFromTasks ?? fallbackStatus}
-              runStatus={runStatus}
-            />
-          );
-        }
-
-        return <ChatBubble key={renderKey} message={message} />;
-      })}
+          {error && (
+            <div className="flex justify-start">
+              <div className="max-w-[90%] whitespace-pre-wrap rounded-2xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm leading-relaxed text-red-100">
+                {error}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-function StepCheckpointCard({
-  title,
-  status,
-  runStatus,
-}: {
-  title: string;
-  status?: string;
-  runStatus: string;
-}) {
-  const isDone = status === "completed";
-  const isActive = status === "in-progress";
-  const rowClass = isDone
-    ? "border-emerald-400/30 bg-emerald-500/10"
-    : isActive || runStatus === "running" || runStatus === "queued"
-      ? "border-amber-400/40 bg-amber-500/10"
-      : "border-white/10 bg-white/5";
-
-  const label = isDone ? "Complete" : isActive ? "In Progress" : "Started";
-
-  return (
-    <div className={`rounded-xl border px-3 py-2 ${rowClass}`}>
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-sm font-medium text-white/90">{title}</p>
-        <span className="rounded-full border border-white/20 bg-white/10 px-2 py-0.5 text-[11px] text-white/80">
-          {label}
-        </span>
-      </div>
-    </div>
-  );
-}
 function ChatBubble({ message: m }: { message: ChatMessage }) {
   const isUser = m.role === "user";
   const isSystem = m.role === "system";

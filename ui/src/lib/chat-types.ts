@@ -42,6 +42,7 @@ export type ChatMessageKind =
   | "step_completed"
   | "log"
   | "thinking"
+  | "terminal_progress"
   | "sql_statement"
   | "sql_error"
   | "run_status";

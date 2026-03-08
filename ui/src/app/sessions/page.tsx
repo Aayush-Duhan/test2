@@ -7,6 +7,7 @@ import { SidebarProvider } from "@/components/ui/sidebar";
 import { Header } from "@/components/header";
 import { SessionSidebar } from "@/components/session-sidebar";
 import { ChatPanel } from "@/components/chat-panel";
+import { workbenchStore } from "@/lib/workbench-store";
 import type { StepState } from "@/lib/migration-types";
 import {
   STEP_BLUEPRINT,
@@ -80,18 +81,20 @@ function buildHydratedMessagesFallback(
 
       if (type === "step:started") {
         usedEventTimeline = true;
-        const label = typeof payload.label === "string" ? payload.label : payload.stepId;
+        const stepId = typeof payload.stepId === "string" ? payload.stepId : "";
+        const label = typeof payload.label === "string" ? payload.label : stepId;
         if (typeof label === "string" && label.length > 0) {
-          timeline.push(makeMessage("system", `Starting: ${label}.`, "step_started"));
+          timeline.push(makeMessage("system", `Starting: ${label}.`, "step_started", undefined, stepId ? { id: stepId, label } : undefined));
         }
         continue;
       }
 
       if (type === "step:completed") {
         usedEventTimeline = true;
-        const label = typeof payload.label === "string" ? payload.label : payload.stepId;
+        const stepId = typeof payload.stepId === "string" ? payload.stepId : "";
+        const label = typeof payload.label === "string" ? payload.label : stepId;
         if (typeof label === "string" && label.length > 0) {
-          timeline.push(makeMessage("system", `Completed: ${label}.`, "step_completed"));
+          timeline.push(makeMessage("system", `Completed: ${label}.`, "step_completed", undefined, stepId ? { id: stepId, label } : undefined));
         }
         continue;
       }
@@ -166,7 +169,7 @@ function buildHydratedMessagesFallback(
 }
 
 /* ================================================================
-   SessionsPage â€” page-level orchestrator for migration sessions.
+   SessionsPage -- page-level orchestrator for migration sessions.
    All rendering is delegated to <Header>, <SessionSidebar>, and
    <ChatPanel>.  This file owns state, API calls, and SSE wiring.
    ================================================================ */
@@ -176,7 +179,7 @@ export default function SessionsPage() {
   const params = useParams<{ id?: string }>();
   const routeRunId = typeof params?.id === "string" ? params.id : null;
 
-  /* â”€â”€ Core state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* -- Core state -------------------------------------------------------------------------------- */
   const [promptMode, setPromptMode] = React.useState<"project" | "chat">("project");
 
   const [projectId, setProjectId] = React.useState<string | null>(null);
@@ -191,7 +194,7 @@ export default function SessionsPage() {
   const [isBusy, setIsBusy] = React.useState(false);
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
 
-  /* Sidebar reload â€” bump to tell the sidebar to re-fetch sessions */
+  /* Sidebar reload -- bump to tell the sidebar to re-fetch sessions */
   const [selectedSessionId, setSelectedSessionId] = React.useState<string | null>(null);
   const [sidebarReloadKey, setSidebarReloadKey] = React.useState(0);
   const reloadSidebar = React.useCallback(() => setSidebarReloadKey((k) => k + 1), []);
@@ -206,7 +209,7 @@ export default function SessionsPage() {
   const [resumeFromStage, setResumeFromStage] = React.useState("");
   const [lastExecutedFileIndex, setLastExecutedFileIndex] = React.useState(-1);
 
-  /* Thinking state â€” true while the agent is actively processing */
+  /* Thinking state -- true while the agent is actively processing */
   const [isAgentThinking, setIsAgentThinking] = React.useState(false);
   /** Tracks the currently running step to contextualise log messages */
   const activeStepRef = React.useRef<string | null>(null);
@@ -214,10 +217,10 @@ export default function SessionsPage() {
 
   const ddlFileInputRef = React.useRef<HTMLInputElement>(null);
 
-  /* â”€â”€ Derived â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* -- Derived ----------------------------------------------------------------------------------- */
   const tasks = React.useMemo(() => buildTasks(steps, status), [steps, status]);
 
-  /* â”€â”€ Hydrate an existing run â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* -- Hydrate an existing run ------------------------------------------------------------------- */
   const hydrateRun = React.useCallback(async (targetRunId: string) => {
     setIsBusy(true);
     setError(null);
@@ -302,7 +305,7 @@ export default function SessionsPage() {
     }
   }, [reloadSidebar]);
 
-  /* â”€â”€ Reset to blank state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* -- Reset to blank state ---------------------------------------------------------------------- */
   const resetToNewSession = React.useCallback(() => {
     setRunId(null);
     setSelectedSessionId(null);
@@ -324,7 +327,7 @@ export default function SessionsPage() {
     router.push("/sessions");
   }, [router]);
 
-  /* â”€â”€ Upload helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* -- Upload helpers ---------------------------------------------------------------------------- */
   const uploadSource = async (pid: string, f: File) => {
     setIsBusy(true);
     setError(null);
@@ -351,7 +354,7 @@ export default function SessionsPage() {
     return data.schemaId as string;
   };
 
-  /* â”€â”€ Start / retry run â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* -- Start / retry run ------------------------------------------------------------------------- */
   const startRun = async (
     pid?: string,
     sid?: string,
@@ -431,7 +434,7 @@ export default function SessionsPage() {
     router.replace(`/sessions/${data.runId}`);
   };
 
-  /* â”€â”€ DDL resume â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* -- DDL resume -------------------------------------------------------------------------------- */
   const handleResumeWithDdl = async (ddlFile: File) => {
     if (!runId) return;
     setIsBusy(true);
@@ -482,7 +485,7 @@ export default function SessionsPage() {
     event.target.value = "";
   };
 
-  /* â”€â”€ Confirm project creation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* -- Confirm project creation ------------------------------------------------------------------ */
   const handleConfirm = async () => {
     // Get files and language from wizard store
     const wizardState = getWizardState();
@@ -537,7 +540,7 @@ export default function SessionsPage() {
     }
   };
 
-  /* â”€â”€ Effects â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* -- Effects ----------------------------------------------------------------------------------- */
   React.useEffect(() => {
     if (!routeRunId || routeRunId === runId) return;
     void hydrateRun(routeRunId);
@@ -552,7 +555,7 @@ export default function SessionsPage() {
     return () => clearInterval(timer);
   }, [runId, status, reconcileRunSnapshot]);
 
-  /* â”€â”€ SSE stream â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* -- SSE stream -------------------------------------------------------------------------------- */
   React.useEffect(() => {
     if (!runId || !isActive(status)) return;
     const source = new EventSource(`/api/runs/${runId}/stream`);
@@ -561,6 +564,16 @@ export default function SessionsPage() {
       const payload = JSON.parse((event as MessageEvent).data);
       if (!isChatMessage(payload)) return;
       chatSchemaReadyRef.current = true;
+
+      const isTerminalOutput = payload.kind === "log" || payload.kind === "terminal_progress";
+      if (isTerminalOutput) {
+        workbenchStore.appendTerminalLine(
+          payload.content,
+          payload.kind === "terminal_progress",
+        );
+        return;
+      }
+
       setMessages((prev) => [...prev, payload]);
       if (payload.kind === "thinking") {
         setIsAgentThinking(true);
@@ -571,14 +584,19 @@ export default function SessionsPage() {
       const payload = JSON.parse((event as MessageEvent).data);
       activeStepRef.current = payload.stepId ?? null;
       setSteps((prev) => prev.map((s) => (s.id === payload.stepId ? { ...s, status: "running" } : s)));
-      if (!chatSchemaReadyRef.current) {
-        const label = typeof payload?.label === "string" ? payload.label : payload.stepId;
-        if (label) {
-          setMessages((prev) => [...prev, makeMessage("system", `Starting: ${label}.`, "step_started")]);
-        }
+
+      const stepId = typeof payload.stepId === "string" ? payload.stepId : "";
+      const label = typeof payload?.label === "string" ? payload.label : stepId;
+      if (label) {
+        workbenchStore.appendTerminalLine(`$ ${label}`, false);
+      }
+      if (!chatSchemaReadyRef.current && label) {
+        setMessages((prev) => [
+          ...prev,
+          makeMessage("system", `Starting: ${label}.`, "step_started", undefined, stepId ? { id: stepId, label } : undefined),
+        ]);
       }
 
-      /* Turn on the "thinking" indicator for LLM-heavy steps */
       if (THINKING_STEPS.includes(payload.stepId)) {
         setIsAgentThinking(true);
       }
@@ -590,9 +608,13 @@ export default function SessionsPage() {
       setIsAgentThinking(false);
       setSteps((prev) => prev.map((s) => (s.id === payload.stepId ? { ...s, status: "completed" } : s)));
       if (!chatSchemaReadyRef.current) {
-        const label = typeof payload?.label === "string" ? payload.label : payload.stepId;
+        const stepId = typeof payload.stepId === "string" ? payload.stepId : "";
+        const label = typeof payload?.label === "string" ? payload.label : stepId;
         if (label) {
-          setMessages((prev) => [...prev, makeMessage("system", `Completed: ${label}.`, "step_completed")]);
+          setMessages((prev) => [
+            ...prev,
+            makeMessage("system", `Completed: ${label}.`, "step_completed", undefined, stepId ? { id: stepId, label } : undefined),
+          ]);
         }
       }
     });
@@ -631,11 +653,12 @@ export default function SessionsPage() {
       const payload = JSON.parse((event as MessageEvent).data);
       const message = typeof payload?.message === "string" ? payload.message.trim() : "";
       if (!message) return;
+      const isProgress = !!payload?.is_progress;
       const step = activeStepRef.current;
       if (step && THINKING_STEPS.includes(step)) {
         setMessages((prev) => [...prev, makeThinkingMessage(message)]);
       } else {
-        setMessages((prev) => [...prev, makeMessage("agent", message, "log")]);
+        workbenchStore.appendTerminalLine(message, isProgress);
       }
     });
 
@@ -677,7 +700,7 @@ export default function SessionsPage() {
     return () => source.close();
   }, [runId, status, reloadSidebar, reconcileRunSnapshot]);
 
-  /* â”€â”€ Render â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+  /* -- Render ------------------------------------------------------------------------------------ */
   return (
     <div
       className="flex h-screen flex-col overflow-hidden bg-[#1a1a1a]"

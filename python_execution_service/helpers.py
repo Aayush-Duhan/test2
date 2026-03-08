@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import threading
+import time
 import uuid
 from dataclasses import asdict
 from datetime import datetime
@@ -24,6 +25,10 @@ from python_execution_service.config import (
 from python_execution_service.models import RunRecord, RunStep, StartRunRequest
 
 logger = logging.getLogger(__name__)
+
+_PERSIST_INTERVAL = 2.0
+_last_persist_time: float = 0.0
+_persist_dirty: bool = False
 
 
 # ── Time helpers ────────────────────────────────────────────────
@@ -80,13 +85,35 @@ def _deserialize_run_record(payload: dict[str, Any]) -> RunRecord:
 
 # ── Persistence ─────────────────────────────────────────────────
 
-def persist_runs_locked() -> None:
-    """Must be called while holding RUN_LOCK."""
+def persist_runs_locked(*, force: bool = False) -> None:
+    """Must be called while holding RUN_LOCK.
+
+    When *force* is False (the default for high-frequency callers), the actual
+    sqlite write is throttled to at most once per ``_PERSIST_INTERVAL`` seconds.
+    The in-memory state is always authoritative; the SSE stream reads from
+    ``run.events`` directly, so throttling persistence does not delay events
+    reaching the frontend.
+    """
+    global _last_persist_time, _persist_dirty
+    now = time.monotonic()
+    _persist_dirty = True
+    if not force and (now - _last_persist_time) < _PERSIST_INTERVAL:
+        return
+    _persist_dirty = False
+    _last_persist_time = now
     for run in RUNS.values():
         try:
             sqlite_store.save_run_snapshot(_serialize_run_record(run))
         except Exception as exc:
             logger.warning("Failed to persist run %s: %s", run.runId, exc)
+
+
+def flush_persist_if_dirty() -> None:
+    """Force a persist if any writes were deferred by throttling."""
+    global _persist_dirty
+    with RUN_LOCK:
+        if _persist_dirty:
+            persist_runs_locked(force=True)
 
 
 def load_persisted_runs() -> None:
@@ -112,7 +139,7 @@ def load_persisted_runs() -> None:
             RUNS[run.runId] = run
             CANCEL_FLAGS[run.runId] = threading.Event()
         if RUNS:
-            persist_runs_locked()
+            persist_runs_locked(force=True)
 
 
 # ── Auth ────────────────────────────────────────────────────────
@@ -261,15 +288,38 @@ def update_step(run: RunRecord, step_id: str, status: str) -> None:
                 if status in ("completed", "failed"):
                     step.endedAt = current_time
                 run.updatedAt = current_time
-                persist_runs_locked()
+                persist_runs_locked(force=True)
                 return
 
 
-def add_log(run: RunRecord, message: str, step_id: str | None = None) -> None:
+def add_log(
+    run: RunRecord,
+    message: str,
+    step_id: str | None = None,
+    is_progress: bool = False,
+) -> None:
     line = _sanitize_content(str(message), strip_prefix=False).strip()
     if not line:
         return
     created_at = now_iso()
+    resolved_step_id = step_id if step_id in STEP_LABELS else None
+
+    if is_progress:
+        kind = "terminal_progress"
+        append_event(run, "log", {"message": line, "is_progress": True})
+        append_chat_message(
+            run,
+            role="agent",
+            kind=kind,
+            content=line,
+            step=(
+                {"id": resolved_step_id, "label": STEP_LABELS[resolved_step_id]}
+                if resolved_step_id
+                else None
+            ),
+        )
+        return
+
     with RUN_LOCK:
         run.logs.append(line)
         run.updatedAt = created_at
@@ -279,7 +329,6 @@ def add_log(run: RunRecord, message: str, step_id: str | None = None) -> None:
     except Exception as exc:
         logger.warning("Failed to append log for run %s: %s", run.runId, exc)
     append_event(run, "log", {"message": line})
-    resolved_step_id = step_id if step_id in STEP_LABELS else None
     append_chat_message(
         run,
         role="agent",
@@ -298,7 +347,7 @@ def set_run_status(run: RunRecord, status: str, error: str | None = None) -> Non
         run.status = status
         run.error = error
         run.updatedAt = now_iso()
-        persist_runs_locked()
+        persist_runs_locked(force=True)
 
 
 def get_steps_template() -> list[RunStep]:

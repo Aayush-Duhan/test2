@@ -2,24 +2,24 @@
 
 import json
 import logging
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
-from agentic_core.decision import should_continue, should_continue_after_execute
-from agentic_core.nodes import (
-    add_source_code_node,
-    apply_schema_mapping_node,
-    convert_code_node,
-    execute_sql_node,
-    finalize_node,
-    human_review_node,
-    init_project_node,
-    self_heal_node,
-    validate_node,
-)
-from agentic_core.state import MigrationContext, MigrationState
+from agentic_core.models.context import MigrationContext, MigrationState
+from agentic_core.nodes.add_source_code import add_source_code_node
+from agentic_core.nodes.convert_code import convert_code_node
+from agentic_core.nodes.execute_sql import execute_sql_node
+from agentic_core.nodes.finalize import finalize_node
+from agentic_core.nodes.human_review import human_review_node
+from agentic_core.nodes.init_project import init_project_node
+from agentic_core.nodes.schema_mapping import apply_schema_mapping_node
+from agentic_core.nodes.self_heal import self_heal_node
+from agentic_core.nodes.validate import validate_node
+from agentic_core.routing.decisions import should_continue, should_continue_after_execute
 from python_execution_service.config import (
     PROJECT_LOCKS,
     RUN_LOCK,
@@ -31,6 +31,7 @@ from python_execution_service.helpers import (
     append_chat_message,
     append_event,
     ensure_not_canceled,
+    flush_persist_if_dirty,
     format_activity_log_entry,
     persist_runs_locked,
     set_run_status,
@@ -39,6 +40,17 @@ from python_execution_service.helpers import (
 from python_execution_service.models import RunRecord, WorkflowState
 
 logger = logging.getLogger(__name__)
+
+
+def _perf_log(run: RunRecord, message: str) -> None:
+    """Append a timestamped line to the run's performance.txt."""
+    try:
+        perf_file = Path(run.outputDir) / "performance.txt"
+        perf_file.parent.mkdir(parents=True, exist_ok=True)
+        with perf_file.open("a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%H:%M:%S')}] {message}\n")
+    except Exception:
+        pass
 
 
 def run_node(
@@ -62,7 +74,11 @@ def run_node(
         content=f"Starting: {STEP_LABELS[step_id]}",
         step={"id": step_id, "label": STEP_LABELS[step_id]},
     )
+    t0 = time.monotonic()
+    _perf_log(run, f"STEP_START  {step_id}")
     state = node_fn(state)
+    elapsed = time.monotonic() - t0
+    _perf_log(run, f"STEP_END    {step_id}  elapsed={elapsed:.3f}s  status={'ERROR' if state.current_stage == MigrationState.ERROR else 'OK'}")
     if state.current_stage == MigrationState.ERROR:
         update_step(run, step_id, "failed")
         raise RuntimeError(state.errors[-1] if state.errors else f"Step failed: {step_id}")
@@ -83,12 +99,14 @@ def run_node(
 
 
 def execute_run_sync(run_id: str) -> None:  # noqa: C901
+    run_t0 = time.monotonic()
     with RUN_LOCK:
         run = RUNS[run_id]
         resume_ddl_path = run.ddlUploadPath
         resume_from_stage = run.resumeFromStage or "execute_sql"
         resume_missing_objects = list(run.missingObjects)
         resume_last_executed_file_index = int(run.lastExecutedFileIndex)
+    _perf_log(run, f"RUN_START   run_id={run_id}")
     try:
         set_run_status(run, "running")
         append_event(run, "run:started", {"runId": run_id})
@@ -104,35 +122,8 @@ def execute_run_sync(run_id: str) -> None:  # noqa: C901
             if formatted:
                 stage = entry.get("stage")
                 step_id = stage if isinstance(stage, str) and stage in STEP_LABELS else None
-                add_log(run, formatted, step_id=step_id)
-
-        context = MigrationContext(
-            project_name=run.projectName,
-            source_language=run.sourceLanguage.lower(),
-            source_directory=str(Path(run.sourcePath).resolve().parent),
-            source_files=[run.sourcePath],
-            mapping_csv_path=run.schemaPath,
-            activity_log_sink=activity_log_sink,
-            sf_account=run.sfAccount or "",
-            sf_user=run.sfUser or "",
-            sf_role=run.sfRole or "",
-            sf_warehouse=run.sfWarehouse or "",
-            sf_database=run.sfDatabase or "",
-            sf_schema=run.sfSchema or "",
-            sf_authenticator=run.sfAuthenticator or "externalbrowser",
-            session_id=run_id,
-        )
-
-        if resume_ddl_path:
-            context.requires_ddl_upload = True
-            context.ddl_upload_path = resume_ddl_path
-            context.resume_from_stage = resume_from_stage
-            context.last_executed_file_index = max(-1, resume_last_executed_file_index)
-            context.missing_objects = resume_missing_objects
-            add_log(
-                run,
-                f"Applying uploaded DDL ({Path(resume_ddl_path).name}) before resuming execute_sql.",
-            )
+                is_progress = bool(entry.get("data", {}).get("is_progress"))
+                add_log(run, formatted, step_id=step_id, is_progress=is_progress)
 
         def sync_execution_state(updated: MigrationContext) -> None:
             with RUN_LOCK:
@@ -145,48 +136,58 @@ def execute_run_sync(run_id: str) -> None:  # noqa: C901
                 run.ddlUploadPath = updated.ddl_upload_path or ""
                 persist_runs_locked()
 
+        _streamed_stmt_lock = threading.Lock()
+        _streamed_stmt_count = 0
+
+        def realtime_execution_event_sink(entry: dict[str, Any]) -> None:
+            """Called from inside execute_sql_statements for EACH completed statement."""
+            nonlocal _streamed_stmt_count
+            stmt_index = entry.get("statement_index")
+            label = f"Stmt {int(stmt_index) + 1}" if isinstance(stmt_index, int) else "Stmt ?"
+            output_preview = entry.get("output_preview", [])
+            output_text = ""
+            if isinstance(output_preview, list) and output_preview:
+                try:
+                    output_text = json.dumps(output_preview, ensure_ascii=False, default=str, indent=2)
+                except Exception:
+                    output_text = str(output_preview)
+
+            append_event(
+                run,
+                "execute_sql:statement",
+                {
+                    "runId": run_id,
+                    "file": entry.get("file"),
+                    "fileIndex": entry.get("fileIndex"),
+                    "statementIndex": stmt_index,
+                    "statement": entry.get("statement"),
+                    "status": entry.get("status"),
+                    "rowCount": entry.get("row_count", 0),
+                    "outputPreview": output_preview,
+                },
+            )
+            append_chat_message(
+                run,
+                role="agent",
+                kind="sql_statement",
+                content=label,
+                step={"id": "execute_sql", "label": STEP_LABELS["execute_sql"]},
+                sql={
+                    "statement": str(entry.get("statement") or ""),
+                    "output": output_text,
+                },
+            )
+            with _streamed_stmt_lock:
+                _streamed_stmt_count += 1
+
         def emit_execute_events(updated: MigrationContext) -> None:
+            """Post-hook: emit error events and any statements missed by real-time sink."""
             execution_log = updated.execution_log or []
             with RUN_LOCK:
                 start_index = max(0, int(run.executionEventCursor))
             new_entries = execution_log[start_index:]
 
             for file_entry in new_entries:
-                for statement_entry in file_entry.get("statements", []):
-                    append_event(
-                        run,
-                        "execute_sql:statement",
-                        {
-                            "runId": run_id,
-                            "file": file_entry.get("file"),
-                            "fileIndex": file_entry.get("index"),
-                            "statementIndex": statement_entry.get("statement_index"),
-                            "statement": statement_entry.get("statement"),
-                            "status": statement_entry.get("status"),
-                            "rowCount": statement_entry.get("row_count", 0),
-                            "outputPreview": statement_entry.get("output_preview", []),
-                        },
-                    )
-                    statement_index = statement_entry.get("statement_index")
-                    label = f"Stmt {int(statement_index) + 1}" if isinstance(statement_index, int) else "Stmt ?"
-                    output_preview = statement_entry.get("output_preview", [])
-                    output_text = ""
-                    if isinstance(output_preview, list) and output_preview:
-                        try:
-                            output_text = json.dumps(output_preview, ensure_ascii=False, default=str, indent=2)
-                        except Exception:
-                            output_text = str(output_preview)
-                    append_chat_message(
-                        run,
-                        role="agent",
-                        kind="sql_statement",
-                        content=label,
-                        step={"id": "execute_sql", "label": STEP_LABELS["execute_sql"]},
-                        sql={
-                            "statement": str(statement_entry.get("statement") or ""),
-                            "output": output_text,
-                        },
-                    )
                 if file_entry.get("status") == "failed":
                     append_event(
                         run,
@@ -221,7 +222,36 @@ def execute_run_sync(run_id: str) -> None:  # noqa: C901
                     )
             with RUN_LOCK:
                 run.executionEventCursor = len(execution_log)
-                persist_runs_locked()
+                persist_runs_locked(force=True)
+
+        context = MigrationContext(
+            project_name=run.projectName,
+            source_language=run.sourceLanguage.lower(),
+            source_directory=str(Path(run.sourcePath).resolve().parent),
+            source_files=[run.sourcePath],
+            mapping_csv_path=run.schemaPath,
+            activity_log_sink=activity_log_sink,
+            execution_event_sink=realtime_execution_event_sink,
+            sf_account=run.sfAccount or "",
+            sf_user=run.sfUser or "",
+            sf_role=run.sfRole or "",
+            sf_warehouse=run.sfWarehouse or "",
+            sf_database=run.sfDatabase or "",
+            sf_schema=run.sfSchema or "",
+            sf_authenticator=run.sfAuthenticator or "externalbrowser",
+            session_id=run_id,
+        )
+
+        if resume_ddl_path:
+            context.requires_ddl_upload = True
+            context.ddl_upload_path = resume_ddl_path
+            context.resume_from_stage = resume_from_stage
+            context.last_executed_file_index = max(-1, resume_last_executed_file_index)
+            context.missing_objects = resume_missing_objects
+            add_log(
+                run,
+                f"Applying uploaded DDL ({Path(resume_ddl_path).name}) before resuming execute_sql.",
+            )
 
         def sync_validation_state(updated: MigrationContext) -> None:
             with RUN_LOCK:
@@ -360,6 +390,9 @@ def execute_run_sync(run_id: str) -> None:  # noqa: C901
             content=message or "Run failed",
         )
     finally:
+        total_elapsed = time.monotonic() - run_t0
+        _perf_log(run, f"RUN_END     run_id={run_id}  total_elapsed={total_elapsed:.3f}s  status={run.status}")
+        flush_persist_if_dirty()
         with RUN_LOCK:
             if PROJECT_LOCKS.get(run.projectId) == run_id:
                 del PROJECT_LOCKS[run.projectId]

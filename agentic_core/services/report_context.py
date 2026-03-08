@@ -1,3 +1,5 @@
+"""Build report-derived context used by validation and self-healing."""
+
 from __future__ import annotations
 
 import csv
@@ -6,10 +8,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .state import MigrationContext
+from agentic_core.models.context import MigrationContext
 
-
-DEFAULT_IGNORED_CODES_PATH = Path(__file__).resolve().parent / "config" / "ignored_report_codes.json"
+DEFAULT_IGNORED_CODES_PATH = Path(__file__).resolve().parent.parent / "config" / "ignored_report_codes.json"
 
 
 def load_ignored_report_codes(config_path: Optional[Path] = None) -> List[str]:
@@ -23,7 +24,7 @@ def load_ignored_report_codes(config_path: Optional[Path] = None) -> List[str]:
     codes = payload.get("ignored_codes", []) if isinstance(payload, dict) else []
     if not isinstance(codes, list):
         return []
-    normalized = []
+    normalized: List[str] = []
     for code in codes:
         if not isinstance(code, str):
             continue
@@ -48,18 +49,18 @@ def _parse_issues_csv(path: Optional[Path]) -> List[Dict[str, Any]]:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
-            code = str(row.get("Code") or "").strip().upper()
-            normalized: Dict[str, Any] = {
-                "code": code,
-                "severity": str(row.get("Severity") or "").strip(),
-                "name": str(row.get("Name") or "").strip(),
-                "description": str(row.get("Description") or "").strip(),
-                "parent_file": str(row.get("ParentFile") or "").strip(),
-                "line": str(row.get("Line") or "").strip(),
-                "column": str(row.get("Column") or "").strip(),
-                "migration_id": str(row.get("MigrationID") or "").strip(),
-            }
-            rows.append(normalized)
+            rows.append(
+                {
+                    "code": str(row.get("Code") or "").strip().upper(),
+                    "severity": str(row.get("Severity") or "").strip(),
+                    "name": str(row.get("Name") or "").strip(),
+                    "description": str(row.get("Description") or "").strip(),
+                    "parent_file": str(row.get("ParentFile") or "").strip(),
+                    "line": str(row.get("Line") or "").strip(),
+                    "column": str(row.get("Column") or "").strip(),
+                    "migration_id": str(row.get("MigrationID") or "").strip(),
+                }
+            )
     return rows
 
 
@@ -162,7 +163,7 @@ def build_report_context_memory(state: MigrationContext) -> Dict[str, Any]:
             }
         )
 
-    memory = {
+    return {
         "reports_found": {
             "issues_csv": str(issues_file) if issues_file else "",
             "assessment_json": str(assessment_file) if assessment_file else "",
@@ -180,4 +181,3 @@ def build_report_context_memory(state: MigrationContext) -> Dict[str, Any]:
         "failed_statements": failed_statements,
         "prior_self_heal_attempts": prior_attempts,
     }
-    return memory

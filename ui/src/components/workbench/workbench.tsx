@@ -27,6 +27,7 @@ export function Workbench({ chatStarted, isStreaming }: WorkbenchProps) {
   const files = useStoreValue(workbenchStore.files);
   const unsavedFiles = useStoreValue(workbenchStore.unsavedFiles);
   const showTerminal = useStoreValue(workbenchStore.showTerminal);
+  const terminalLines = useStoreValue(workbenchStore.terminalLines);
 
   // ✅ Refs to avoid stale closures + avoid putting large objects in deps
   const selectedFileRef = React.useRef<string | undefined>(selectedFile);
@@ -201,6 +202,7 @@ export function Workbench({ chatStarted, isStreaming }: WorkbenchProps) {
                     selectedFile={selectedFile}
                     files={files}
                     unsavedFiles={unsavedFiles}
+                    terminalLines={terminalLines}
                     onFileSelect={handleFileSelect}
                     onEditorChange={handleEditorChange}
                     onFileSave={handleFileSave}

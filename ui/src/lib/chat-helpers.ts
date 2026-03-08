@@ -23,6 +23,7 @@ export function makeMessage(
   content: string,
   kind: ChatMessageKind = "log",
   sql?: ChatSqlDetails,
+  step?: { id: string; label: string },
 ): ChatMessage {
   return {
     id:
@@ -31,6 +32,7 @@ export function makeMessage(
     content: content.trim(),
     kind,
     sql,
+    step,
   };
 }
 
