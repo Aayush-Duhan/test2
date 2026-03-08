@@ -1,14 +1,15 @@
 "use client";
 
 import * as React from "react";
-import { ChevronRight, Terminal } from "lucide-react";
+import { ChevronDown, ChevronRight, Terminal } from "lucide-react";
 import { PromptBox } from "@/components/ui/chatgpt-prompt-input";
 import AgentPlan, { type Task } from "@/components/ui/agent-plan";
 import { SidebarInset } from "@/components/ui/sidebar";
 import type { ChatMessage } from "@/lib/chat-types";
 import { SetupWizard } from "@/components/ui/setup-wizard";
 import { Workbench } from "@/components/workbench";
-import { workbenchStore, type UploadedFile } from "@/lib/workbench-store";
+import { TerminalPane } from "@/components/workbench/terminal-pane";
+import { workbenchStore, type TerminalLine, type UploadedFile } from "@/lib/workbench-store";
 
 interface ChatPanelProps {
   runId: string | null;
@@ -51,6 +52,16 @@ export function ChatPanel({
   onPickDdlFile,
   onSendAgentMessage,
 }: ChatPanelProps) {
+  const showTerminal = React.useSyncExternalStore(
+    workbenchStore.showTerminal.subscribe,
+    workbenchStore.showTerminal.get,
+    workbenchStore.showTerminal.get,
+  );
+  const terminalLines = React.useSyncExternalStore(
+    workbenchStore.terminalLines.subscribe,
+    workbenchStore.terminalLines.get,
+    workbenchStore.terminalLines.get,
+  );
   const isSessionFinished = runId !== null && ["failed", "canceled"].includes(status);
   const isAgentPhase = status === "completed";
   const hasActiveRun = runId !== null;
@@ -152,9 +163,8 @@ export function ChatPanel({
     [messages],
   );
 
-  const openTerminal = React.useCallback(() => {
-    workbenchStore.setShowWorkbench(true);
-    workbenchStore.toggleTerminal(true);
+  const handleToggleTerminal = React.useCallback(() => {
+    workbenchStore.toggleTerminal();
   }, []);
 
   return (
@@ -168,11 +178,11 @@ export function ChatPanel({
               <div className="mt-2 flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={openTerminal}
+                  onClick={handleToggleTerminal}
                   className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white/60 hover:bg-white/10 hover:text-white/90 transition-colors"
                 >
                   <Terminal className="h-3.5 w-3.5" />
-                  View Terminal Output
+                  {showTerminal ? "Hide Terminal Output" : "Show Terminal Output"}
                 </button>
               </div>
             </div>
@@ -195,6 +205,12 @@ export function ChatPanel({
               messages={chatMessages}
               error={error}
               isAgentThinking={isAgentThinking}
+            />
+
+            <ChatTerminal
+              isOpen={showTerminal}
+              lines={terminalLines}
+              onToggle={handleToggleTerminal}
             />
           </>
         ) : isHydratingRun ? (
@@ -280,6 +296,37 @@ function DdlUploadBanner({
   );
 }
 
+function ChatTerminal({
+  isOpen,
+  lines,
+  onToggle,
+}: {
+  isOpen: boolean;
+  lines: TerminalLine[];
+  onToggle: () => void;
+}) {
+  return (
+    <div className="shrink-0 border-t border-white/10 bg-[#111111]">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center gap-2 px-4 py-3 text-left text-sm text-white/80 transition-colors hover:bg-white/5"
+      >
+        <Terminal className="h-4 w-4 shrink-0" />
+        <span className="font-medium">Terminal Output</span>
+        <span className="text-xs text-white/45">{lines.length > 0 ? `${lines.length} lines` : "Waiting for output"}</span>
+        <ChevronDown className={`ml-auto h-4 w-4 transition-transform ${isOpen ? "rotate-180" : ""}`} />
+      </button>
+
+      {isOpen && (
+        <div className="h-64 border-t border-white/10 bg-[#0a0a0a]">
+          <TerminalPane lines={lines} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ChatMessageArea({
   messages,
   error,
@@ -306,7 +353,7 @@ function ChatMessageArea({
     <div ref={scrollRef} className="scrollbar-dark flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-3">
       {!hasContent ? (
         <div className="flex flex-1 items-center justify-center">
-          <p className="text-sm text-white/40">Chat messages will appear here. Terminal output is in the workbench panel.</p>
+          <p className="text-sm text-white/40">Chat messages will appear here. Terminal output is available below.</p>
         </div>
       ) : (
         <div className="space-y-3">

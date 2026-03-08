@@ -167,6 +167,23 @@ def append_event(run: RunRecord, event_type: str, payload: dict[str, Any]) -> No
         handle.write(json.dumps(event) + "\n")
 
 
+def append_terminal_output(
+    run: RunRecord,
+    text: str,
+    *,
+    is_progress: bool = False,
+    step_id: str | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "text": str(text),
+        "isProgress": is_progress,
+    }
+    if step_id in STEP_LABELS:
+        payload["stepId"] = step_id
+        payload["stepLabel"] = STEP_LABELS[step_id]
+    append_event(run, "terminal:output", payload)
+
+
 def _strip_log_tags(message: str) -> str:
     return re.sub(r"^\s*(?:\[[^\]]+\]\s*)+", "", message).strip()
 
@@ -305,19 +322,7 @@ def add_log(
     resolved_step_id = step_id if step_id in STEP_LABELS else None
 
     if is_progress:
-        kind = "terminal_progress"
-        append_event(run, "log", {"message": line, "is_progress": True})
-        append_chat_message(
-            run,
-            role="agent",
-            kind=kind,
-            content=line,
-            step=(
-                {"id": resolved_step_id, "label": STEP_LABELS[resolved_step_id]}
-                if resolved_step_id
-                else None
-            ),
-        )
+        append_terminal_output(run, line, is_progress=True, step_id=resolved_step_id)
         return
 
     with RUN_LOCK:
@@ -328,18 +333,7 @@ def add_log(
         sqlite_store.append_run_log(run.runId, line, created_at)
     except Exception as exc:
         logger.warning("Failed to append log for run %s: %s", run.runId, exc)
-    append_event(run, "log", {"message": line})
-    append_chat_message(
-        run,
-        role="agent",
-        kind="thinking" if resolved_step_id in THINKING_STEP_IDS else "log",
-        content=line,
-        step=(
-            {"id": resolved_step_id, "label": STEP_LABELS[resolved_step_id]}
-            if resolved_step_id
-            else None
-        ),
-    )
+    append_terminal_output(run, line, step_id=resolved_step_id)
 
 
 def set_run_status(run: RunRecord, status: str, error: str | None = None) -> None:

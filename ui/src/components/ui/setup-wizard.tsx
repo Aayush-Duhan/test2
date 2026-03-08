@@ -50,7 +50,7 @@ const LanguageStep = React.memo(function LanguageStep() {
       <div>
         <h3 className="text-lg font-semibold text-white mb-2">Select Source Database</h3>
         <p className="text-sm text-[#8a8a8f] mb-4">
-          Choose the database platform you're migrating from.
+          Choose the database platform you are migrating from.
         </p>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
@@ -331,7 +331,7 @@ const MappingStep = React.memo(function MappingStep() {
       )}
 
       <p className="text-xs text-[#666]">
-        Skip this step if you don't have schema mapping files. You can provide mappings later.
+        Skip this step if you do not have schema mapping files. You can provide mappings later.
       </p>
     </div>
   );
@@ -553,8 +553,8 @@ interface SetupWizardProps {
 
 // Main Wizard Component
 export const SetupWizard = React.memo(function SetupWizard({ onStartMigration, isBusy = false }: SetupWizardProps) {
-  const { currentStep, completedSteps, sourceLanguage, sourceFiles, isStarting } = useWizardState();
-  const visibleSteps = React.useMemo(() => getVisibleWizardSteps(), [sourceLanguage]);
+  const { currentStep, completedSteps, isStarting } = useWizardState();
+  const visibleSteps = getVisibleWizardSteps();
   const canProceed = canProceedToNext();
   const first = isFirstStep();
   const last = isLastStep();

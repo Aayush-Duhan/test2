@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Terminal, XCircle, ChevronLeft, ChevronRight, FileCode } from "lucide-react";
+import { XCircle, ChevronLeft, ChevronRight, FileCode } from "lucide-react";
 import { workbenchStore, type EditorDocument } from "@/lib/workbench-store";
 import { EditorPanel } from "./editor-panel";
 
@@ -26,8 +26,6 @@ export function Workbench({ chatStarted, isStreaming }: WorkbenchProps) {
   const selectedFile = useStoreValue(workbenchStore.selectedFile);
   const files = useStoreValue(workbenchStore.files);
   const unsavedFiles = useStoreValue(workbenchStore.unsavedFiles);
-  const showTerminal = useStoreValue(workbenchStore.showTerminal);
-  const terminalLines = useStoreValue(workbenchStore.terminalLines);
 
   // ✅ Refs to avoid stale closures + avoid putting large objects in deps
   const selectedFileRef = React.useRef<string | undefined>(selectedFile);
@@ -112,10 +110,6 @@ export function Workbench({ chatStarted, isStreaming }: WorkbenchProps) {
     workbenchStore.resetCurrentDocument();
   }, []);
 
-  const handleToggleTerminal = React.useCallback(() => {
-    workbenchStore.toggleTerminal();
-  }, []);
-
   const handleClose = React.useCallback(() => {
     workbenchStore.setShowWorkbench(false);
   }, []);
@@ -172,19 +166,6 @@ export function Workbench({ chatStarted, isStreaming }: WorkbenchProps) {
                   <span className="ml-2 text-xs text-white/50">({fileCount} files)</span>
                   <div className="ml-auto flex items-center gap-1">
                     <button
-                      onClick={handleToggleTerminal}
-                      className={cn(
-                        "flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md transition-colors",
-                        showTerminal
-                          ? "bg-white/15 text-white"
-                          : "bg-transparent text-white/60 hover:text-white hover:bg-white/10"
-                      )}
-                      type="button"
-                    >
-                      <Terminal className="h-3.5 w-3.5" />
-                      Terminal
-                    </button>
-                    <button
                       onClick={handleClose}
                       className="p-1.5 rounded-md text-white/60 hover:text-white hover:bg-white/10"
                       type="button"
@@ -202,13 +183,10 @@ export function Workbench({ chatStarted, isStreaming }: WorkbenchProps) {
                     selectedFile={selectedFile}
                     files={files}
                     unsavedFiles={unsavedFiles}
-                    terminalLines={terminalLines}
                     onFileSelect={handleFileSelect}
                     onEditorChange={handleEditorChange}
                     onFileSave={handleFileSave}
                     onFileReset={handleFileReset}
-                    showTerminal={showTerminal}
-                    onToggleTerminal={handleToggleTerminal}
                   />
                 </div>
               </div>
@@ -218,9 +196,4 @@ export function Workbench({ chatStarted, isStreaming }: WorkbenchProps) {
       </AnimatePresence>
     </>
   );
-}
-
-// Helper function (since we can't import from utils)
-function cn(...classes: (string | boolean | undefined | null)[]) {
-  return classes.filter(Boolean).join(" ");
 }

@@ -39,6 +39,11 @@ export interface TerminalLine {
   ts: number;
 }
 
+export interface TerminalSnapshotLine {
+  text: string;
+  isProgress: boolean;
+}
+
 const WORK_DIR = '/project';
 
 /**
@@ -109,6 +114,18 @@ export class WorkbenchStore {
       this.#terminalLines.set([...prev, entry]);
     }
     if (!this.#showTerminal.get()) {
+      this.#showTerminal.set(true);
+    }
+  }
+
+  replaceTerminalLines(lines: TerminalSnapshotLine[]): void {
+    const normalized = lines.map((line, index) => ({
+      text: line.text,
+      isProgress: line.isProgress,
+      ts: Date.now() + index,
+    }));
+    this.#terminalLines.set(normalized);
+    if (normalized.length > 0 && !this.#showTerminal.get()) {
       this.#showTerminal.set(true);
     }
   }

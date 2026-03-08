@@ -5,12 +5,10 @@ import {
   FolderTree,
   Save,
   RotateCcw,
-  Terminal as TerminalIcon,
-  ChevronDown,
   FileCode,
 } from "lucide-react";
 
-import type { FileMap, EditorDocument, TerminalLine } from "@/lib/workbench-store";
+import type { FileMap, EditorDocument } from "@/lib/workbench-store";
 import { cn } from "@/lib/utils";
 import { FileTree } from "./file-tree";
 import { CodeMirrorEditor } from "./codemirror/CodeMirrorEditor";
@@ -21,13 +19,10 @@ interface EditorPanelProps {
   editorDocument?: EditorDocument;
   selectedFile?: string;
   isStreaming?: boolean;
-  terminalLines?: TerminalLine[];
   onFileSelect?: (value?: string) => void;
   onEditorChange?: (content: string) => void;
   onFileSave?: () => void;
   onFileReset?: () => void;
-  showTerminal?: boolean;
-  onToggleTerminal?: () => void;
 }
 
 export function EditorPanel({
@@ -36,13 +31,10 @@ export function EditorPanel({
   editorDocument,
   selectedFile,
   isStreaming,
-  terminalLines = [],
   onFileSelect,
   onEditorChange,
   onFileSave,
   onFileReset,
-  showTerminal = false,
-  onToggleTerminal,
 }: EditorPanelProps) {
   const filePath = editorDocument?.filePath;
 
@@ -221,52 +213,6 @@ export function EditorPanel({
           </div>
         </div>
       </div>
-
-      {showTerminal && (
-        <div className="h-56 border-t border-white/10 bg-[#0a0a0a] flex flex-col">
-          <div className="flex items-center gap-2 px-3 py-2 border-b border-white/10 bg-[#0d0d0d]">
-            <div className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full bg-white/10 text-white">
-              <TerminalIcon className="h-3.5 w-3.5" />
-              AI Agent
-            </div>
-            <button
-              onClick={onToggleTerminal}
-              className="ml-auto p-1 rounded hover:bg-white/10 text-white/60 hover:text-white"
-            >
-              <ChevronDown className="h-4 w-4" />
-            </button>
-          </div>
-          <TerminalOutput lines={terminalLines} />
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TerminalOutput({ lines }: { lines: TerminalLine[] }) {
-  const scrollRef = React.useRef<HTMLDivElement>(null);
-
-  React.useEffect(() => {
-    const el = scrollRef.current;
-    if (el) {
-      el.scrollTop = el.scrollHeight;
-    }
-  }, [lines]);
-
-  return (
-    <div ref={scrollRef} className="flex-1 overflow-y-auto p-3 font-mono text-xs leading-relaxed">
-      {lines.length === 0 ? (
-        <div className="text-white/30">Waiting for agent commands...</div>
-      ) : (
-        lines.map((line, i) => (
-          <div
-            key={`${i}-${line.ts}`}
-            className={line.isProgress ? "text-emerald-400/90" : "text-white/70"}
-          >
-            {line.text}
-          </div>
-        ))
-      )}
     </div>
   );
 }

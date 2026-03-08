@@ -30,6 +30,7 @@ from python_execution_service.helpers import (
     add_log,
     append_chat_message,
     append_event,
+    append_terminal_output,
     ensure_not_canceled,
     flush_persist_if_dirty,
     format_activity_log_entry,
@@ -67,6 +68,7 @@ def run_node(
         "step:started",
         {"runId": run_id, "stepId": step_id, "label": STEP_LABELS[step_id]},
     )
+    append_terminal_output(run, f"$ {STEP_LABELS[step_id]}", step_id=step_id)
     append_chat_message(
         run,
         role="system",
@@ -124,6 +126,11 @@ def execute_run_sync(run_id: str) -> None:  # noqa: C901
                 step_id = stage if isinstance(stage, str) and stage in STEP_LABELS else None
                 is_progress = bool(entry.get("data", {}).get("is_progress"))
                 add_log(run, formatted, step_id=step_id, is_progress=is_progress)
+
+        def terminal_output_sink(text: str, is_progress: bool = False) -> None:
+            stage = context.current_stage.value if context.current_stage else None
+            step_id = stage if isinstance(stage, str) and stage in STEP_LABELS else None
+            append_terminal_output(run, text, is_progress=is_progress, step_id=step_id)
 
         def sync_execution_state(updated: MigrationContext) -> None:
             with RUN_LOCK:
@@ -232,6 +239,7 @@ def execute_run_sync(run_id: str) -> None:  # noqa: C901
             mapping_csv_path=run.schemaPath,
             activity_log_sink=activity_log_sink,
             execution_event_sink=realtime_execution_event_sink,
+            terminal_output_sink=terminal_output_sink,
             sf_account=run.sfAccount or "",
             sf_user=run.sfUser or "",
             sf_role=run.sfRole or "",

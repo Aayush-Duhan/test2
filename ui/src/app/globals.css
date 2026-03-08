@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "@xterm/xterm/css/xterm.css";
 
 /* FIXED: use real characters (not HTML entities) */
 @custom-variant dark (&:is(.dark *));
@@ -200,6 +201,16 @@
     border-right: 1px solid rgba(255, 255, 255, 0.08) !important;
     background: #141414 !important;
     overflow: hidden;
+  }
+}
+
+@layer utilities {
+  .xterm .xterm-viewport {
+    scrollbar-width: thin;
+  }
+
+  .xterm .xterm-screen canvas {
+    image-rendering: auto;
   }
 }
 

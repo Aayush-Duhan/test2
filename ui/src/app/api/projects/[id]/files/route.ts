@@ -31,6 +31,11 @@ type FileInfo =
   | { name: string; path: string; type: 'folder' }
   | { name: string; path: string; type: 'file'; content: string };
 
+interface WritableFileInput {
+  path: string;
+  content: string;
+}
+
 /** Convert Windows "\" to "/" for consistent matching */
 function toPosix(p: string) {
   return p.split(path.sep).join('/');
@@ -102,6 +107,24 @@ function isAllowedRealRelative(realRel: string): boolean {
     const mapped = toPosix(mappedReal).replace(/^\/+/, '');
     return realPosix === mapped || realPosix.startsWith(mapped + '/');
   });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isWritableFileInput(value: unknown): value is WritableFileInput {
+  return (
+    isRecord(value) &&
+    typeof value.path === 'string' &&
+    typeof value.content === 'string'
+  );
+}
+
+function getWritableFilePath(value: unknown): string {
+  return isRecord(value) && typeof value.path === 'string'
+    ? value.path
+    : '(unknown)';
 }
 
 async function readTextFileSafe(absPath: string): Promise<string> {
@@ -291,7 +314,7 @@ export async function POST(
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
 
-  const files = (body as any)?.files as Array<{ path: string; content: string }>;
+  const files = isRecord(body) ? body.files : undefined;
   if (!Array.isArray(files)) {
     return NextResponse.json(
       { error: 'Body must be { files: Array<{ path, content }> }' },
@@ -303,9 +326,9 @@ export async function POST(
 
   for (const file of files) {
     try {
-      if (!file || typeof file.path !== 'string' || typeof file.content !== 'string') {
+      if (!isWritableFileInput(file)) {
         results.push({
-          path: typeof (file as any)?.path === 'string' ? (file as any).path : '(unknown)',
+          path: getWritableFilePath(file),
           success: false,
           error: 'Invalid file entry. Expected { path: string; content: string }',
         });
@@ -339,7 +362,7 @@ export async function POST(
       results.push({ path: file.path, success: true });
     } catch (error) {
       results.push({
-        path: (file as any)?.path ?? '(unknown)',
+        path: getWritableFilePath(file),
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
       });

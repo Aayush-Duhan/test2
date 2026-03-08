@@ -54,11 +54,13 @@ def add_source_code_node(state: MigrationContext) -> MigrationContext:
             shutil.rmtree(source_dir_abs)
 
         cmd = ["scai", "code", "add", "-i", source_input_abs]
+        terminal_sink = getattr(state, "terminal_output_sink", None)
 
-        def line_sink(line: str, is_progress: bool = False) -> None:
-            log_event(state, "info", line, {"is_progress": is_progress} if is_progress else None)
-
-        return_code, stdout, stderr = run_scai_command(cmd, state.project_path, line_callback=line_sink)
+        return_code, stdout, stderr = run_scai_command(
+            cmd,
+            state.project_path,
+            terminal_callback=terminal_sink,
+        )
         if stderr:
             log_event(state, "warning", "scai code add stderr", {"stderr": stderr})
 

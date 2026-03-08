@@ -41,11 +41,13 @@ def init_project_node(state: MigrationContext) -> MigrationContext:
 
         os.makedirs(project_path, exist_ok=True)
         cmd = ["scai", "init", "-l", state.source_language, "-n", state.project_name]
+        terminal_sink = getattr(state, "terminal_output_sink", None)
 
-        def line_sink(line: str, is_progress: bool = False) -> None:
-            log_event(state, "info", line, {"is_progress": is_progress} if is_progress else None)
-
-        return_code, stdout, stderr = run_scai_command(cmd, project_path, line_callback=line_sink)
+        return_code, stdout, stderr = run_scai_command(
+            cmd,
+            project_path,
+            terminal_callback=terminal_sink,
+        )
         if stderr:
             log_event(state, "warning", "scai init stderr", {"stderr": stderr})
 

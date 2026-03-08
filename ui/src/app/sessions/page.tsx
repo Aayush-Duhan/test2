@@ -28,7 +28,6 @@ import {
 } from "@/lib/chat-helpers";
 import {
   getWizardState,
-  resetWizard,
 } from "@/lib/wizard-store";
 
 function isChatMessage(value: unknown): value is ChatMessage {
@@ -40,6 +39,71 @@ function isChatMessage(value: unknown): value is ChatMessage {
     typeof row.kind === "string" &&
     typeof row.content === "string"
   );
+}
+
+type TerminalSnapshotLine = {
+  text: string;
+  isProgress: boolean;
+};
+
+function buildHydratedTerminalLines(
+  events: unknown,
+  messages: unknown,
+  logs: unknown,
+): TerminalSnapshotLine[] {
+  const lines: TerminalSnapshotLine[] = [];
+
+  if (Array.isArray(events)) {
+    for (const raw of events) {
+      if (!raw || typeof raw !== "object") continue;
+      const event = raw as { type?: string; payload?: Record<string, unknown> };
+      const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+
+      if (event.type === "terminal:output") {
+        const text = typeof payload.text === "string" ? payload.text : "";
+        if (text.trim().length > 0) {
+          lines.push({ text, isProgress: Boolean(payload.isProgress) });
+        }
+        continue;
+      }
+
+      if (event.type === "log") {
+        const text = typeof payload.message === "string" ? payload.message : "";
+        if (text.trim().length > 0) {
+          lines.push({ text, isProgress: Boolean(payload.is_progress) });
+        }
+      }
+    }
+  }
+
+  if (lines.length > 0) {
+    return lines;
+  }
+
+  if (Array.isArray(messages)) {
+    for (const raw of messages) {
+      if (!isChatMessage(raw)) continue;
+      if (raw.kind !== "log" && raw.kind !== "terminal_progress") continue;
+      if (raw.content.trim().length === 0) continue;
+      lines.push({
+        text: raw.content,
+        isProgress: raw.kind === "terminal_progress",
+      });
+    }
+  }
+
+  if (lines.length > 0) {
+    return lines;
+  }
+
+  if (Array.isArray(logs)) {
+    for (const raw of logs) {
+      if (typeof raw !== "string" || raw.trim().length === 0) continue;
+      lines.push({ text: raw, isProgress: false });
+    }
+  }
+
+  return lines;
 }
 
 /** Step IDs where the agent performs LLM-heavy work (thinking indicator). */
@@ -100,11 +164,6 @@ function buildHydratedMessagesFallback(
       }
 
       if (type === "log") {
-        usedEventTimeline = true;
-        const message = typeof payload.message === "string" ? payload.message.trim() : "";
-        if (message.length > 0) {
-          timeline.push(makeMessage("agent", message, "log"));
-        }
         continue;
       }
 
@@ -153,16 +212,8 @@ function buildHydratedMessagesFallback(
     }
   }
 
-  if (!usedEventTimeline && Array.isArray(logs)) {
-    for (const raw of logs) {
-      if (typeof raw === "string" && raw.trim().length > 0) {
-        timeline.push(makeMessage("agent", raw, "log"));
-      }
-    }
-  }
-
   if (!usedEventTimeline) {
-    return [...timeline, ...buildSqlExecutionMessages(statements, errors)];
+    return buildSqlExecutionMessages(statements, errors);
   }
 
   return timeline;
@@ -180,7 +231,7 @@ export default function SessionsPage() {
   const routeRunId = typeof params?.id === "string" ? params.id : null;
 
   /* -- Core state -------------------------------------------------------------------------------- */
-  const [promptMode, setPromptMode] = React.useState<"project" | "chat">("project");
+  const [, setPromptMode] = React.useState<"project" | "chat">("project");
 
   const [projectId, setProjectId] = React.useState<string | null>(null);
   const [sourceId, setSourceId] = React.useState<string | null>(null);
@@ -200,8 +251,8 @@ export default function SessionsPage() {
   const reloadSidebar = React.useCallback(() => setSidebarReloadKey((k) => k + 1), []);
 
   /* Execution tracking (used for hydration fallback) */
-  const [executeStatements, setExecuteStatements] = React.useState<ExecuteStatementEvent[]>([]);
-  const [executeErrors, setExecuteErrors] = React.useState<ExecuteErrorEvent[]>([]);
+  const [, setExecuteStatements] = React.useState<ExecuteStatementEvent[]>([]);
+  const [, setExecuteErrors] = React.useState<ExecuteErrorEvent[]>([]);
 
   /* DDL-resume state */
   const [requiresDdlUpload, setRequiresDdlUpload] = React.useState(false);
@@ -224,6 +275,7 @@ export default function SessionsPage() {
   const hydrateRun = React.useCallback(async (targetRunId: string) => {
     setIsBusy(true);
     setError(null);
+    workbenchStore.clearTerminal();
     const res = await fetch(`/api/runs/${targetRunId}`, { cache: "no-store" });
     if (!res.ok) { setError("Unable to load session"); setIsBusy(false); return; }
     const data = await res.json();
@@ -245,6 +297,9 @@ export default function SessionsPage() {
     setMissingObjects(Array.isArray(data.missingObjects) ? data.missingObjects : []);
     setResumeFromStage(typeof data.resumeFromStage === "string" ? data.resumeFromStage : "");
     setLastExecutedFileIndex(typeof data.lastExecutedFileIndex === "number" ? data.lastExecutedFileIndex : -1);
+    workbenchStore.replaceTerminalLines(
+      buildHydratedTerminalLines(data.events, data.messages, data.logs),
+    );
 
     const hydratedMessages = Array.isArray(data.messages)
       ? data.messages.filter(isChatMessage)
@@ -277,6 +332,9 @@ export default function SessionsPage() {
         const se: ExecuteErrorEvent[] = Array.isArray(data.executionErrors) ? data.executionErrors : [];
         setMessages(buildHydratedMessagesFallback(data.events, data.logs, ss, se));
       }
+      workbenchStore.replaceTerminalLines(
+        buildHydratedTerminalLines(data.events, data.messages, data.logs),
+      );
 
       const nextStatus = typeof data.status === "string" ? data.status : "idle";
       setStatus(nextStatus);
@@ -304,28 +362,6 @@ export default function SessionsPage() {
       // no-op: reconciliation is best-effort
     }
   }, [reloadSidebar]);
-
-  /* -- Reset to blank state ---------------------------------------------------------------------- */
-  const resetToNewSession = React.useCallback(() => {
-    setRunId(null);
-    setSelectedSessionId(null);
-    setStatus("idle");
-    setSteps(STEP_BLUEPRINT);
-    setMessages([]);
-    setExecuteStatements([]);
-    setExecuteErrors([]);
-    setRequiresDdlUpload(false);
-    setMissingObjects([]);
-    setResumeFromStage("");
-    setLastExecutedFileIndex(-1);
-    setIsAgentThinking(false);
-    activeStepRef.current = null;
-    setError(null);
-    setPromptMode("project");
-    // Reset the wizard store as well
-    resetWizard();
-    router.push("/sessions");
-  }, [router]);
 
   /* -- Upload helpers ---------------------------------------------------------------------------- */
   const uploadSource = async (pid: string, f: File) => {
@@ -381,6 +417,7 @@ export default function SessionsPage() {
     setMessages([]);
     setExecuteStatements([]);
     setExecuteErrors([]);
+    workbenchStore.clearTerminal();
 
     const res = await fetch("/api/runs", {
       method: "POST",
@@ -425,6 +462,7 @@ export default function SessionsPage() {
     setMessages([]);
     setExecuteStatements([]);
     setExecuteErrors([]);
+    workbenchStore.clearTerminal();
     setRequiresDdlUpload(false);
     setMissingObjects([]);
     setResumeFromStage("");
@@ -565,15 +603,6 @@ export default function SessionsPage() {
       if (!isChatMessage(payload)) return;
       chatSchemaReadyRef.current = true;
 
-      const isTerminalOutput = payload.kind === "log" || payload.kind === "terminal_progress";
-      if (isTerminalOutput) {
-        workbenchStore.appendTerminalLine(
-          payload.content,
-          payload.kind === "terminal_progress",
-        );
-        return;
-      }
-
       setMessages((prev) => [...prev, payload]);
       if (payload.kind === "thinking") {
         setIsAgentThinking(true);
@@ -600,6 +629,13 @@ export default function SessionsPage() {
       if (THINKING_STEPS.includes(payload.stepId)) {
         setIsAgentThinking(true);
       }
+    });
+
+    source.addEventListener("terminal:output", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data);
+      const text = typeof payload?.text === "string" ? payload.text : "";
+      if (!text) return;
+      workbenchStore.appendTerminalLine(text, Boolean(payload?.isProgress));
     });
 
     source.addEventListener("step:completed", (event) => {
@@ -649,17 +685,10 @@ export default function SessionsPage() {
     });
 
     source.addEventListener("log", (event) => {
-      if (chatSchemaReadyRef.current) return;
       const payload = JSON.parse((event as MessageEvent).data);
       const message = typeof payload?.message === "string" ? payload.message.trim() : "";
       if (!message) return;
-      const isProgress = !!payload?.is_progress;
-      const step = activeStepRef.current;
-      if (step && THINKING_STEPS.includes(step)) {
-        setMessages((prev) => [...prev, makeThinkingMessage(message)]);
-      } else {
-        workbenchStore.appendTerminalLine(message, isProgress);
-      }
+      workbenchStore.appendTerminalLine(message, !!payload?.is_progress);
     });
 
     source.addEventListener("selfheal:iteration", (event) => {

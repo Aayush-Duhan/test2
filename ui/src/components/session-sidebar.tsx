@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { ChevronDown, ChevronRight, FolderOpen, LayoutDashboard } from "lucide-react";
+import { ChevronRight, FolderOpen, LayoutDashboard } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -34,7 +34,7 @@ export function SessionSidebar({
   const router = useRouter();
   const pathname = usePathname();
   const [open, setOpen] = React.useState(false);
-  const { setOpen: setSidebarOpen, open: isSidebarOpen } = useSidebar();
+  const { setOpen: setSidebarOpen } = useSidebar();
 
   const hoverTimeoutRef = React.useRef<NodeJS.Timeout>(undefined);
 

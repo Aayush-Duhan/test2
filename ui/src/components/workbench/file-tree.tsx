@@ -110,7 +110,7 @@ export function FileTree({
 
       return setsEqual(prev, next) ? prev : next;
     });
-  }, [collapsed, folderPathsKey]); // ✅ stable dependencies
+  }, [collapsed, folderPaths, folderPathsKey]);
 
   const filteredFileList = React.useMemo(() => {
     const list: Node[] = [];

@@ -23,11 +23,13 @@ def convert_code_node(state: MigrationContext) -> MigrationContext:
 
     try:
         cmd = ["scai", "code", "convert"]
+        terminal_sink = getattr(state, "terminal_output_sink", None)
 
-        def line_sink(line: str, is_progress: bool = False) -> None:
-            log_event(state, "info", line, {"is_progress": is_progress} if is_progress else None)
-
-        return_code, stdout, stderr = run_scai_command(cmd, state.project_path, line_callback=line_sink)
+        return_code, stdout, stderr = run_scai_command(
+            cmd,
+            state.project_path,
+            terminal_callback=terminal_sink,
+        )
         if stderr:
             log_event(state, "warning", "scai code convert stderr", {"stderr": stderr})
 
