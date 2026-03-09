@@ -15,10 +15,65 @@ function normalizeTerminalText(text: string): string {
   return text.replace(/\r?\n/g, "\r\n").replace(/\u0000/g, "");
 }
 
+function sameLine(a: TerminalCommand["lines"][number], b: TerminalCommand["lines"][number]): boolean {
+  return a.text === b.text && a.isProgress === b.isProgress;
+}
+
+function isPrefixMatch(prev: TerminalCommand["lines"], next: TerminalCommand["lines"], length: number): boolean {
+  for (let i = 0; i < length; i++) {
+    if (!sameLine(prev[i], next[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function InlineTerminalBody({ lines }: { lines: TerminalCommand["lines"] }) {
   const hostRef = React.useRef<HTMLDivElement>(null);
   const terminalRef = React.useRef<XTerm | null>(null);
   const fitAddonRef = React.useRef<FitAddon | null>(null);
+  const renderedLinesRef = React.useRef<TerminalCommand["lines"]>([]);
+  const previousWasProgressRef = React.useRef(false);
+
+  const writeEntry = React.useCallback((terminal: XTerm, line: TerminalCommand["lines"][number]) => {
+    const text = normalizeTerminalText(line.text);
+    if (!text) {
+      return;
+    }
+
+    if (line.isProgress) {
+      terminal.write("\r\x1b[2K");
+      terminal.write(text);
+      previousWasProgressRef.current = true;
+      return;
+    }
+
+    if (previousWasProgressRef.current) {
+      terminal.write("\r\n");
+      previousWasProgressRef.current = false;
+    }
+
+    terminal.write(text);
+    if (!text.endsWith("\r") && !text.endsWith("\n")) {
+      terminal.write("\r\n");
+    }
+  }, []);
+
+  const renderFromScratch = React.useCallback((terminal: XTerm, nextLines: TerminalCommand["lines"]) => {
+    terminal.reset();
+    previousWasProgressRef.current = false;
+
+    if (nextLines.length === 0) {
+      terminal.writeln("\x1b[90mWaiting for output...\x1b[0m");
+      renderedLinesRef.current = [];
+      return;
+    }
+
+    for (const line of nextLines) {
+      writeEntry(terminal, line);
+    }
+    renderedLinesRef.current = nextLines.slice();
+  }, [writeEntry]);
 
   React.useEffect(() => {
     const host = hostRef.current;
@@ -41,6 +96,22 @@ function InlineTerminalBody({ lines }: { lines: TerminalCommand["lines"] }) {
         cursor: "#f4d35e",
         cursorAccent: "#0a0a0a",
         selectionBackground: "rgba(244, 211, 94, 0.22)",
+        black: "#0a0a0a",
+        red: "#ff7b72",
+        green: "#7ee787",
+        yellow: "#f4d35e",
+        blue: "#79c0ff",
+        magenta: "#d2a8ff",
+        cyan: "#7ee7ff",
+        white: "#d7dde8",
+        brightBlack: "#6e7681",
+        brightRed: "#ffa198",
+        brightGreen: "#56d364",
+        brightYellow: "#e3b341",
+        brightBlue: "#a5d6ff",
+        brightMagenta: "#e2c5ff",
+        brightCyan: "#b3f0ff",
+        brightWhite: "#f0f6fc",
       },
     });
 
@@ -54,55 +125,73 @@ function InlineTerminalBody({ lines }: { lines: TerminalCommand["lines"] }) {
 
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
+    renderFromScratch(terminal, lines);
+    fitAddon.fit();
+    terminal.scrollToBottom();
 
     return () => {
       observer.disconnect();
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
+      renderedLinesRef.current = [];
+      previousWasProgressRef.current = false;
     };
-  }, []);
+  }, [lines, renderFromScratch]);
 
   React.useEffect(() => {
     const terminal = terminalRef.current;
     const fitAddon = fitAddonRef.current;
     if (!terminal || !fitAddon) return;
 
-    terminal.reset();
+    const prevLines = renderedLinesRef.current;
+    const nextLines = lines;
 
-    if (lines.length === 0) {
-      terminal.writeln("\x1b[90mWaiting for output...\x1b[0m");
+    if (nextLines.length === 0 || prevLines.length === 0 || nextLines.length < prevLines.length) {
+      renderFromScratch(terminal, nextLines);
       fitAddon.fit();
+      terminal.scrollToBottom();
       return;
     }
 
-    let previousWasProgress = false;
+    const onlyLastProgressUpdated =
+      nextLines.length === prevLines.length &&
+      nextLines.length > 0 &&
+      isPrefixMatch(prevLines, nextLines, nextLines.length - 1) &&
+      prevLines[prevLines.length - 1].isProgress &&
+      nextLines[nextLines.length - 1].isProgress &&
+      prevLines[prevLines.length - 1].text !== nextLines[nextLines.length - 1].text;
 
-    for (const line of lines) {
-      const text = normalizeTerminalText(line.text);
-      if (!text) continue;
-
-      if (line.isProgress) {
-        terminal.write("\r\x1b[2K");
-        terminal.write(text);
-        previousWasProgress = true;
-        continue;
-      }
-
-      if (previousWasProgress) {
-        terminal.write("\r\n");
-        previousWasProgress = false;
-      }
-
+    if (onlyLastProgressUpdated) {
+      const text = normalizeTerminalText(nextLines[nextLines.length - 1].text);
+      terminal.write("\r\x1b[2K");
       terminal.write(text);
-      if (!text.endsWith("\r") && !text.endsWith("\n")) {
-        terminal.write("\r\n");
-      }
+      previousWasProgressRef.current = true;
+      renderedLinesRef.current = nextLines.slice();
+      fitAddon.fit();
+      terminal.scrollToBottom();
+      return;
     }
 
+    const isAppend =
+      nextLines.length >= prevLines.length &&
+      isPrefixMatch(prevLines, nextLines, prevLines.length);
+
+    if (!isAppend) {
+      renderFromScratch(terminal, nextLines);
+      fitAddon.fit();
+      terminal.scrollToBottom();
+      return;
+    }
+
+    for (let i = prevLines.length; i < nextLines.length; i++) {
+      writeEntry(terminal, nextLines[i]);
+    }
+
+    renderedLinesRef.current = nextLines.slice();
     fitAddon.fit();
     terminal.scrollToBottom();
-  }, [lines]);
+  }, [lines, renderFromScratch, writeEntry]);
 
   return <div ref={hostRef} className="h-full w-full px-3 py-2" />;
 }

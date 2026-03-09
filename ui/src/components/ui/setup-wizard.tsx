@@ -339,7 +339,7 @@ const MappingStep = React.memo(function MappingStep() {
 
 // Step 6: Summary
 const SummaryStep = React.memo(function SummaryStep() {
-  const { sourceLanguage, scriptTypes, sourceFiles, mappingFiles, sfAccount, sfUser, sfAuthenticator, isStarting, startError } = useWizardState();
+  const { sourceLanguage, scriptTypes, sourceFiles, mappingFiles, sfAccount, sfUser, isStarting, startError } = useWizardState();
 
   const language = SOURCE_LANGUAGES.find((l) => l.id === sourceLanguage);
 
@@ -432,7 +432,7 @@ const SummaryStep = React.memo(function SummaryStep() {
                 {sfAccount} &middot; {sfUser}
               </p>
               <p className="text-xs text-[#666] mt-0.5">
-                Auth: {sfAuthenticator === 'externalbrowser' ? 'Browser SSO' : 'Username / Password'}
+                Auth: Browser SSO
               </p>
             </div>
           </div>
@@ -458,7 +458,7 @@ const SummaryStep = React.memo(function SummaryStep() {
 // Step 5: Snowflake Credentials
 const CREDENTIAL_FIELDS = [
   { key: 'sfAccount' as const, label: 'Account', placeholder: 'e.g. xy12345.us-east-1', required: true },
-  { key: 'sfUser' as const, label: 'User', placeholder: 'e.g. admin@company.com', required: true },
+  { key: 'sfUser' as const, label: 'User', placeholder: 'e.g. admin@company.com', required: false },
   { key: 'sfRole' as const, label: 'Role', placeholder: 'e.g. SYSADMIN', required: false },
   { key: 'sfWarehouse' as const, label: 'Warehouse', placeholder: 'e.g. COMPUTE_WH', required: false },
   { key: 'sfDatabase' as const, label: 'Database', placeholder: 'e.g. MY_DATABASE', required: false },
@@ -473,7 +473,7 @@ const CredentialsStep = React.memo(function CredentialsStep() {
       <div>
         <h3 className="text-lg font-semibold text-white mb-2">Snowflake Connection</h3>
         <p className="text-sm text-[#8a8a8f] mb-4">
-          Provide your Snowflake credentials. Account and User are required.
+          Provide your Snowflake connection details. Account is required; user is optional.
         </p>
       </div>
 
@@ -494,32 +494,6 @@ const CredentialsStep = React.memo(function CredentialsStep() {
           </div>
         ))}
 
-        {/* Authenticator selector */}
-        <div className="space-y-1.5 sm:col-span-2">
-          <label className="text-xs font-medium text-[#8a8a8f]">Authenticator</label>
-          <div className="flex gap-3">
-            {(['externalbrowser', 'snowflake'] as const).map((auth) => (
-              <button
-                key={auth}
-                type="button"
-                onClick={() => setCredentialField('sfAuthenticator', auth)}
-                className={cn(
-                  'flex-1 rounded-lg border px-3 py-2.5 text-sm font-medium transition-all',
-                  wizard.sfAuthenticator === auth
-                    ? 'border-[#4da5fc] bg-[#4da5fc]/10 text-white'
-                    : 'border-[#333] bg-[#1a1a1a] text-[#8a8a8f] hover:border-[#444] hover:text-white'
-                )}
-              >
-                {auth === 'externalbrowser' ? 'Browser SSO' : 'Username / Password'}
-              </button>
-            ))}
-          </div>
-          <p className="text-xs text-[#555]">
-            {wizard.sfAuthenticator === 'externalbrowser'
-              ? 'Opens a browser window for single sign-on. Token is cached for ~4 hours.'
-              : 'Authenticate with Snowflake username and password.'}
-          </p>
-        </div>
       </div>
     </div>
   );

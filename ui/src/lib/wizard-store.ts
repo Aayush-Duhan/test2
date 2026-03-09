@@ -96,7 +96,7 @@ export interface WizardState {
   sfWarehouse: string;
   sfDatabase: string;
   sfSchema: string;
-  sfAuthenticator: 'externalbrowser' | 'snowflake';
+  sfAuthenticator: 'externalbrowser';
   
   // Step 6: Summary
   isStarting: boolean;
@@ -104,22 +104,90 @@ export interface WizardState {
 }
 
 // Initial state
-const initialState: WizardState = {
+const LOCAL_STORAGE_KEY = 'migration-wizard-snowflake-connection';
+
+function loadSavedCredentials(): Pick<WizardState, 'sfAccount' | 'sfUser' | 'sfRole' | 'sfWarehouse' | 'sfDatabase' | 'sfSchema'> {
+  if (typeof window === 'undefined') {
+    return {
+      sfAccount: '',
+      sfUser: '',
+      sfRole: '',
+      sfWarehouse: '',
+      sfDatabase: '',
+      sfSchema: '',
+    };
+  }
+
+  try {
+    const raw = window.localStorage.getItem(LOCAL_STORAGE_KEY);
+    if (!raw) {
+      return {
+        sfAccount: '',
+        sfUser: '',
+        sfRole: '',
+        sfWarehouse: '',
+        sfDatabase: '',
+        sfSchema: '',
+      };
+    }
+    const parsed = JSON.parse(raw) as Partial<Record<'sfAccount' | 'sfUser' | 'sfRole' | 'sfWarehouse' | 'sfDatabase' | 'sfSchema', unknown>>;
+    return {
+      sfAccount: typeof parsed.sfAccount === 'string' ? parsed.sfAccount : '',
+      sfUser: typeof parsed.sfUser === 'string' ? parsed.sfUser : '',
+      sfRole: typeof parsed.sfRole === 'string' ? parsed.sfRole : '',
+      sfWarehouse: typeof parsed.sfWarehouse === 'string' ? parsed.sfWarehouse : '',
+      sfDatabase: typeof parsed.sfDatabase === 'string' ? parsed.sfDatabase : '',
+      sfSchema: typeof parsed.sfSchema === 'string' ? parsed.sfSchema : '',
+    };
+  } catch {
+    return {
+      sfAccount: '',
+      sfUser: '',
+      sfRole: '',
+      sfWarehouse: '',
+      sfDatabase: '',
+      sfSchema: '',
+    };
+  }
+}
+
+function persistCredentials(nextState: WizardState) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.localStorage.setItem(
+    LOCAL_STORAGE_KEY,
+    JSON.stringify({
+      sfAccount: nextState.sfAccount,
+      sfUser: nextState.sfUser,
+      sfRole: nextState.sfRole,
+      sfWarehouse: nextState.sfWarehouse,
+      sfDatabase: nextState.sfDatabase,
+      sfSchema: nextState.sfSchema,
+    }),
+  );
+}
+
+function getInitialState(): WizardState {
+  const saved = loadSavedCredentials();
+  return {
   currentStep: 'language',
   completedSteps: [],
   sourceLanguage: '',
   scriptTypes: [],
   sourceFiles: [],
   mappingFiles: [],
-  sfAccount: '',
-  sfUser: '',
-  sfRole: '',
-  sfWarehouse: '',
-  sfDatabase: '',
-  sfSchema: '',
+  sfAccount: saved.sfAccount,
+  sfUser: saved.sfUser,
+  sfRole: saved.sfRole,
+  sfWarehouse: saved.sfWarehouse,
+  sfDatabase: saved.sfDatabase,
+  sfSchema: saved.sfSchema,
   sfAuthenticator: 'externalbrowser',
   isStarting: false,
-};
+  };
+}
 
 function getVisibleStepsForState(wizard: WizardState): readonly (typeof WIZARD_STEPS)[number][] {
   if (!wizard.sourceLanguage) {
@@ -133,7 +201,7 @@ export function getVisibleWizardSteps() {
 }
 
 // Create a simple store using React state pattern
-let state = { ...initialState };
+let state = getInitialState();
 const listeners = new Set<() => void>();
 
 export function getWizardState(): WizardState {
@@ -226,7 +294,9 @@ export function setCredentialField(
   field: 'sfAccount' | 'sfUser' | 'sfRole' | 'sfWarehouse' | 'sfDatabase' | 'sfSchema' | 'sfAuthenticator',
   value: string,
 ) {
-  state = { ...state, [field]: value };
+  const normalizedValue = field === 'sfAuthenticator' ? 'externalbrowser' : value;
+  state = { ...state, [field]: normalizedValue };
+  persistCredentials(state);
   notifyListeners();
 }
 
@@ -272,7 +342,7 @@ export function goToPreviousStep() {
 }
 
 export function resetWizard() {
-  state = { ...initialState };
+  state = getInitialState();
   notifyListeners();
 }
 
@@ -304,7 +374,7 @@ export function canProceedToNext(): boolean {
       // Mapping is optional
       return true;
     case 'credentials':
-      return currentState.sfAccount.trim().length > 0 && currentState.sfUser.trim().length > 0;
+      return currentState.sfAccount.trim().length > 0;
     case 'summary':
       return !currentState.isStarting;
     default:

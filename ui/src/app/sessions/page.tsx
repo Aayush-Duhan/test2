@@ -47,7 +47,7 @@ function buildHydratedTerminalCommands(
   logs: unknown,
 ): TerminalCommand[] {
   const commandMap = new Map<string, TerminalCommand>();
-  let commandOrder: string[] = [];
+  const commandOrder: string[] = [];
   let autoCounter = 0;
 
   const getOrCreateCommand = (stepId?: string, label?: string): TerminalCommand => {
@@ -100,12 +100,6 @@ function buildHydratedTerminalCommands(
         continue;
       }
 
-      if (event.type === "log") {
-        const text = typeof payload.message === "string" ? payload.message : "";
-        if (text.trim().length === 0) continue;
-        const cmd = getOrCreateCommand(currentStepId, currentLabel);
-        cmd.lines.push({ text, isProgress: Boolean(payload.is_progress), ts: Date.now() });
-      }
     }
   }
 
@@ -113,31 +107,10 @@ function buildHydratedTerminalCommands(
     return commandOrder.map((key) => commandMap.get(key)!).filter((cmd) => cmd.lines.length > 0);
   }
 
-  // Fallback: build from messages
-  if (Array.isArray(messages)) {
-    const fallbackCmd = getOrCreateCommand("_fallback", "$ Terminal Output");
-    for (const raw of messages) {
-      if (!isChatMessage(raw)) continue;
-      if (raw.kind !== "log" && raw.kind !== "terminal_progress") continue;
-      if (raw.content.trim().length === 0) continue;
-      fallbackCmd.lines.push({
-        text: raw.content,
-        isProgress: raw.kind === "terminal_progress",
-        ts: Date.now(),
-      });
-    }
-    if (fallbackCmd.lines.length > 0) return [fallbackCmd];
-  }
-
-  // Fallback: build from logs
-  if (Array.isArray(logs)) {
-    const logCmd = getOrCreateCommand("_logs", "$ Terminal Output");
-    for (const raw of logs) {
-      if (typeof raw !== "string" || raw.trim().length === 0) continue;
-      logCmd.lines.push({ text: raw, isProgress: false, ts: Date.now() });
-    }
-    if (logCmd.lines.length > 0) return [logCmd];
-  }
+  // Avoid hydrating terminal from generic run logs/chat logs to keep terminal output scoped
+  // strictly to terminal:output events.
+  void messages;
+  void logs;
 
   return [];
 }
