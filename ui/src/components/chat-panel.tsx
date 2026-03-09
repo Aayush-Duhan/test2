@@ -1,15 +1,15 @@
 "use client";
 
 import * as React from "react";
-import { ChevronDown, ChevronRight, Terminal } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { PromptBox } from "@/components/ui/chatgpt-prompt-input";
 import AgentPlan, { type Task } from "@/components/ui/agent-plan";
 import { SidebarInset } from "@/components/ui/sidebar";
 import type { ChatMessage } from "@/lib/chat-types";
 import { SetupWizard } from "@/components/ui/setup-wizard";
 import { Workbench } from "@/components/workbench";
-import { TerminalPane } from "@/components/workbench/terminal-pane";
-import { workbenchStore, type TerminalLine, type UploadedFile } from "@/lib/workbench-store";
+import { InlineTerminal } from "@/components/inline-terminal";
+import { workbenchStore, type TerminalCommand, type UploadedFile } from "@/lib/workbench-store";
 
 interface ChatPanelProps {
   runId: string | null;
@@ -52,15 +52,10 @@ export function ChatPanel({
   onPickDdlFile,
   onSendAgentMessage,
 }: ChatPanelProps) {
-  const showTerminal = React.useSyncExternalStore(
-    workbenchStore.showTerminal.subscribe,
-    workbenchStore.showTerminal.get,
-    workbenchStore.showTerminal.get,
-  );
-  const terminalLines = React.useSyncExternalStore(
-    workbenchStore.terminalLines.subscribe,
-    workbenchStore.terminalLines.get,
-    workbenchStore.terminalLines.get,
+  const terminalCommands = React.useSyncExternalStore(
+    workbenchStore.terminalCommands.subscribe,
+    workbenchStore.terminalCommands.get,
+    workbenchStore.terminalCommands.get,
   );
   const isSessionFinished = runId !== null && ["failed", "canceled"].includes(status);
   const isAgentPhase = status === "completed";
@@ -163,10 +158,6 @@ export function ChatPanel({
     [messages],
   );
 
-  const handleToggleTerminal = React.useCallback(() => {
-    workbenchStore.toggleTerminal();
-  }, []);
-
   return (
     <div className="flex min-h-0 flex-1 overflow-hidden">
       <SidebarInset className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#1a1a1a]">
@@ -175,16 +166,6 @@ export function ChatPanel({
             {/* Agent Plan — compact progress tracker */}
             <div className="shrink-0 p-4 pb-0">
               <AgentPlan tasks={tasks} readOnly />
-              <div className="mt-2 flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleToggleTerminal}
-                  className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white/60 hover:bg-white/10 hover:text-white/90 transition-colors"
-                >
-                  <Terminal className="h-3.5 w-3.5" />
-                  {showTerminal ? "Hide Terminal Output" : "Show Terminal Output"}
-                </button>
-              </div>
             </div>
 
             {requiresDdlUpload && (
@@ -200,17 +181,12 @@ export function ChatPanel({
               </div>
             )}
 
-            {/* Chat messages area */}
+            {/* Chat messages area — now includes inline terminal blocks */}
             <ChatMessageArea
               messages={chatMessages}
+              terminalCommands={terminalCommands}
               error={error}
               isAgentThinking={isAgentThinking}
-            />
-
-            <ChatTerminal
-              isOpen={showTerminal}
-              lines={terminalLines}
-              onToggle={handleToggleTerminal}
             />
           </>
         ) : isHydratingRun ? (
@@ -296,47 +272,41 @@ function DdlUploadBanner({
   );
 }
 
-function ChatTerminal({
-  isOpen,
-  lines,
-  onToggle,
-}: {
-  isOpen: boolean;
-  lines: TerminalLine[];
-  onToggle: () => void;
-}) {
-  return (
-    <div className="shrink-0 border-t border-white/10 bg-[#111111]">
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-center gap-2 px-4 py-3 text-left text-sm text-white/80 transition-colors hover:bg-white/5"
-      >
-        <Terminal className="h-4 w-4 shrink-0" />
-        <span className="font-medium">Terminal Output</span>
-        <span className="text-xs text-white/45">{lines.length > 0 ? `${lines.length} lines` : "Waiting for output"}</span>
-        <ChevronDown className={`ml-auto h-4 w-4 transition-transform ${isOpen ? "rotate-180" : ""}`} />
-      </button>
-
-      {isOpen && (
-        <div className="h-64 border-t border-white/10 bg-[#0a0a0a]">
-          <TerminalPane lines={lines} />
-        </div>
-      )}
-    </div>
-  );
-}
+/** Merged timeline item — either a chat message or a terminal command block */
+type TimelineItem =
+  | { type: "message"; message: ChatMessage; ts: number }
+  | { type: "terminal"; command: TerminalCommand; ts: number };
 
 function ChatMessageArea({
   messages,
+  terminalCommands,
   error,
   isAgentThinking = false,
 }: {
   messages: ChatMessage[];
+  terminalCommands: TerminalCommand[];
   error: string | null;
   isAgentThinking?: boolean;
 }) {
   const scrollRef = React.useRef<HTMLDivElement>(null);
+
+  // Build a merged chronological timeline of messages + terminal commands
+  const timeline = React.useMemo(() => {
+    const items: TimelineItem[] = [];
+
+    for (const m of messages) {
+      const ts = m.ts ? new Date(m.ts).getTime() : 0;
+      items.push({ type: "message", message: m, ts });
+    }
+
+    for (const cmd of terminalCommands) {
+      items.push({ type: "terminal", command: cmd, ts: cmd.ts });
+    }
+
+    // Sort by timestamp, preserving insertion order for equal timestamps
+    items.sort((a, b) => a.ts - b.ts);
+    return items;
+  }, [messages, terminalCommands]);
 
   React.useEffect(() => {
     const el = scrollRef.current;
@@ -345,21 +315,29 @@ function ChatMessageArea({
     if (isNearBottom) {
       el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
     }
-  }, [messages, isAgentThinking]);
+  }, [timeline, isAgentThinking]);
 
-  const hasContent = messages.length > 0 || isAgentThinking || error;
+  const hasContent = timeline.length > 0 || isAgentThinking || error;
 
   return (
     <div ref={scrollRef} className="scrollbar-dark flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-3">
       {!hasContent ? (
         <div className="flex flex-1 items-center justify-center">
-          <p className="text-sm text-white/40">Chat messages will appear here. Terminal output is available below.</p>
+          <p className="text-sm text-white/40">Chat messages and terminal output will appear here.</p>
         </div>
       ) : (
         <div className="space-y-3">
-          {messages.map((m, i) => (
-            <ChatBubble key={`${m.id}-${i}`} message={m} />
-          ))}
+          {timeline.map((item, i) => {
+            if (item.type === "terminal") {
+              return (
+                <InlineTerminal
+                  key={`term-${item.command.id}`}
+                  command={item.command}
+                />
+              );
+            }
+            return <ChatBubble key={`msg-${item.message.id}-${i}`} message={item.message} />;
+          })}
 
           {isAgentThinking && (
             <div className="flex justify-start">
@@ -471,4 +449,3 @@ function buildPlainMessageBody(message: ChatMessage): string {
 
   return chunks.filter((chunk) => chunk.trim().length > 0).join("\n\n");
 }
-

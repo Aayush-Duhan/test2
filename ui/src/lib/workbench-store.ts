@@ -44,6 +44,15 @@ export interface TerminalSnapshotLine {
   isProgress: boolean;
 }
 
+export interface TerminalCommand {
+  id: string;
+  label: string;
+  stepId?: string;
+  lines: TerminalLine[];
+  isComplete: boolean;
+  ts: number;  // timestamp of first line, used for chronological ordering
+}
+
 const WORK_DIR = '/project';
 
 /**
@@ -55,8 +64,7 @@ export class WorkbenchStore {
   #selectedFile: WritableAtom<string | undefined> = atom(undefined);
   #unsavedFiles: WritableAtom<Set<string>> = atom(new Set<string>());
   #showWorkbench: WritableAtom<boolean> = atom(false);
-  #showTerminal: WritableAtom<boolean> = atom(false);
-  #terminalLines: WritableAtom<TerminalLine[]> = atom<TerminalLine[]>([]);
+  #terminalCommands: WritableAtom<TerminalCommand[]> = atom<TerminalCommand[]>([]);
   #size = 0;
 
   get files(): MapStore<FileMap> {
@@ -75,12 +83,8 @@ export class WorkbenchStore {
     return this.#showWorkbench;
   }
 
-  get showTerminal(): WritableAtom<boolean> {
-    return this.#showTerminal;
-  }
-
-  get terminalLines(): WritableAtom<TerminalLine[]> {
-    return this.#terminalLines;
+  get terminalCommands(): WritableAtom<TerminalCommand[]> {
+    return this.#terminalCommands;
   }
 
   get filesCount(): number {
@@ -99,39 +103,77 @@ export class WorkbenchStore {
     this.#showWorkbench.set(show);
   }
 
-  toggleTerminal(value?: boolean): void {
-    this.#showTerminal.set(value ?? !this.#showTerminal.get());
+  startTerminalCommand(id: string, label: string, stepId?: string): void {
+    const cmd: TerminalCommand = {
+      id,
+      label,
+      stepId,
+      lines: [],
+      isComplete: false,
+      ts: Date.now(),
+    };
+    this.#terminalCommands.set([...this.#terminalCommands.get(), cmd]);
   }
 
-  appendTerminalLine(text: string, isProgress: boolean): void {
-    const prev = this.#terminalLines.get();
+  appendTerminalLine(text: string, isProgress: boolean, commandId?: string): void {
+    const commands = this.#terminalCommands.get();
     const entry: TerminalLine = { text, isProgress, ts: Date.now() };
-    if (isProgress && prev.length > 0 && prev[prev.length - 1].isProgress) {
-      const updated = [...prev];
-      updated[updated.length - 1] = entry;
-      this.#terminalLines.set(updated);
+
+    // Find the target command: by commandId, or the latest one
+    let targetIndex = -1;
+    if (commandId) {
+      for (let i = commands.length - 1; i >= 0; i--) {
+        if (commands[i].id === commandId || commands[i].stepId === commandId) {
+          targetIndex = i;
+          break;
+        }
+      }
+    }
+    if (targetIndex < 0 && commands.length > 0) {
+      targetIndex = commands.length - 1;
+    }
+
+    if (targetIndex < 0) {
+      // No command exists yet — create a generic one
+      const cmd: TerminalCommand = {
+        id: `auto-${Date.now()}`,
+        label: '$ Terminal Output',
+        lines: [entry],
+        isComplete: false,
+        ts: Date.now(),
+      };
+      this.#terminalCommands.set([...commands, cmd]);
+      return;
+    }
+
+    const updated = [...commands];
+    const cmd = { ...updated[targetIndex], lines: [...updated[targetIndex].lines] };
+
+    if (isProgress && cmd.lines.length > 0 && cmd.lines[cmd.lines.length - 1].isProgress) {
+      cmd.lines[cmd.lines.length - 1] = entry;
     } else {
-      this.#terminalLines.set([...prev, entry]);
+      cmd.lines.push(entry);
     }
-    if (!this.#showTerminal.get()) {
-      this.#showTerminal.set(true);
-    }
+    updated[targetIndex] = cmd;
+    this.#terminalCommands.set(updated);
   }
 
-  replaceTerminalLines(lines: TerminalSnapshotLine[]): void {
-    const normalized = lines.map((line, index) => ({
-      text: line.text,
-      isProgress: line.isProgress,
-      ts: Date.now() + index,
-    }));
-    this.#terminalLines.set(normalized);
-    if (normalized.length > 0 && !this.#showTerminal.get()) {
-      this.#showTerminal.set(true);
-    }
+  completeTerminalCommand(commandId: string): void {
+    const commands = this.#terminalCommands.get();
+    const updated = commands.map((cmd) =>
+      (cmd.id === commandId || cmd.stepId === commandId)
+        ? { ...cmd, isComplete: true }
+        : cmd
+    );
+    this.#terminalCommands.set(updated);
+  }
+
+  replaceTerminalCommands(commands: TerminalCommand[]): void {
+    this.#terminalCommands.set(commands);
   }
 
   clearTerminal(): void {
-    this.#terminalLines.set([]);
+    this.#terminalCommands.set([]);
   }
 
   setSelectedFile(filePath: string | undefined): void {
@@ -190,7 +232,7 @@ export class WorkbenchStore {
     this.#savedFiles.clear();
     this.#selectedFile.set(undefined);
     this.#unsavedFiles.set(new Set());
-    this.#terminalLines.set([]);
+    this.#terminalCommands.set([]);
     this.#size = 0;
     this.#showWorkbench.set(false);
   }

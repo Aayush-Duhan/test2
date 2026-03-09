@@ -7,7 +7,7 @@ import { SidebarProvider } from "@/components/ui/sidebar";
 import { Header } from "@/components/header";
 import { SessionSidebar } from "@/components/session-sidebar";
 import { ChatPanel } from "@/components/chat-panel";
-import { workbenchStore } from "@/lib/workbench-store";
+import { workbenchStore, type TerminalCommand } from "@/lib/workbench-store";
 import type { StepState } from "@/lib/migration-types";
 import {
   STEP_BLUEPRINT,
@@ -41,69 +41,105 @@ function isChatMessage(value: unknown): value is ChatMessage {
   );
 }
 
-type TerminalSnapshotLine = {
-  text: string;
-  isProgress: boolean;
-};
-
-function buildHydratedTerminalLines(
+function buildHydratedTerminalCommands(
   events: unknown,
   messages: unknown,
   logs: unknown,
-): TerminalSnapshotLine[] {
-  const lines: TerminalSnapshotLine[] = [];
+): TerminalCommand[] {
+  const commandMap = new Map<string, TerminalCommand>();
+  let commandOrder: string[] = [];
+  let autoCounter = 0;
+
+  const getOrCreateCommand = (stepId?: string, label?: string): TerminalCommand => {
+    const key = stepId || `_auto_${autoCounter++}`;
+    let cmd = commandMap.get(key);
+    if (!cmd) {
+      cmd = {
+        id: key,
+        label: label || (stepId ? `$ ${stepId}` : "$ Terminal Output"),
+        stepId: stepId || undefined,
+        lines: [],
+        isComplete: true, // hydrated commands are always complete
+        ts: Date.now() + commandOrder.length,
+      };
+      commandMap.set(key, cmd);
+      commandOrder.push(key);
+    }
+    return cmd;
+  };
 
   if (Array.isArray(events)) {
+    let currentStepId: string | undefined;
+    let currentLabel: string | undefined;
+
     for (const raw of events) {
       if (!raw || typeof raw !== "object") continue;
       const event = raw as { type?: string; payload?: Record<string, unknown> };
       const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
 
+      if (event.type === "step:started") {
+        currentStepId = typeof payload.stepId === "string" ? payload.stepId : undefined;
+        currentLabel = typeof payload.label === "string" ? `$ ${payload.label}` : undefined;
+        if (currentStepId) {
+          getOrCreateCommand(currentStepId, currentLabel);
+        }
+        continue;
+      }
+
+      if (event.type === "step:completed") {
+        continue;
+      }
+
       if (event.type === "terminal:output") {
         const text = typeof payload.text === "string" ? payload.text : "";
-        if (text.trim().length > 0) {
-          lines.push({ text, isProgress: Boolean(payload.isProgress) });
-        }
+        if (text.trim().length === 0) continue;
+        const stepId = typeof payload.stepId === "string" ? payload.stepId : currentStepId;
+        const stepLabel = typeof payload.stepLabel === "string" ? `$ ${payload.stepLabel}` : currentLabel;
+        const cmd = getOrCreateCommand(stepId, stepLabel);
+        cmd.lines.push({ text, isProgress: Boolean(payload.isProgress), ts: Date.now() });
         continue;
       }
 
       if (event.type === "log") {
         const text = typeof payload.message === "string" ? payload.message : "";
-        if (text.trim().length > 0) {
-          lines.push({ text, isProgress: Boolean(payload.is_progress) });
-        }
+        if (text.trim().length === 0) continue;
+        const cmd = getOrCreateCommand(currentStepId, currentLabel);
+        cmd.lines.push({ text, isProgress: Boolean(payload.is_progress), ts: Date.now() });
       }
     }
   }
 
-  if (lines.length > 0) {
-    return lines;
+  if (commandOrder.length > 0) {
+    return commandOrder.map((key) => commandMap.get(key)!).filter((cmd) => cmd.lines.length > 0);
   }
 
+  // Fallback: build from messages
   if (Array.isArray(messages)) {
+    const fallbackCmd = getOrCreateCommand("_fallback", "$ Terminal Output");
     for (const raw of messages) {
       if (!isChatMessage(raw)) continue;
       if (raw.kind !== "log" && raw.kind !== "terminal_progress") continue;
       if (raw.content.trim().length === 0) continue;
-      lines.push({
+      fallbackCmd.lines.push({
         text: raw.content,
         isProgress: raw.kind === "terminal_progress",
+        ts: Date.now(),
       });
     }
+    if (fallbackCmd.lines.length > 0) return [fallbackCmd];
   }
 
-  if (lines.length > 0) {
-    return lines;
-  }
-
+  // Fallback: build from logs
   if (Array.isArray(logs)) {
+    const logCmd = getOrCreateCommand("_logs", "$ Terminal Output");
     for (const raw of logs) {
       if (typeof raw !== "string" || raw.trim().length === 0) continue;
-      lines.push({ text: raw, isProgress: false });
+      logCmd.lines.push({ text: raw, isProgress: false, ts: Date.now() });
     }
+    if (logCmd.lines.length > 0) return [logCmd];
   }
 
-  return lines;
+  return [];
 }
 
 /** Step IDs where the agent performs LLM-heavy work (thinking indicator). */
@@ -297,8 +333,8 @@ export default function SessionsPage() {
     setMissingObjects(Array.isArray(data.missingObjects) ? data.missingObjects : []);
     setResumeFromStage(typeof data.resumeFromStage === "string" ? data.resumeFromStage : "");
     setLastExecutedFileIndex(typeof data.lastExecutedFileIndex === "number" ? data.lastExecutedFileIndex : -1);
-    workbenchStore.replaceTerminalLines(
-      buildHydratedTerminalLines(data.events, data.messages, data.logs),
+    workbenchStore.replaceTerminalCommands(
+      buildHydratedTerminalCommands(data.events, data.messages, data.logs),
     );
 
     const hydratedMessages = Array.isArray(data.messages)
@@ -332,8 +368,8 @@ export default function SessionsPage() {
         const se: ExecuteErrorEvent[] = Array.isArray(data.executionErrors) ? data.executionErrors : [];
         setMessages(buildHydratedMessagesFallback(data.events, data.logs, ss, se));
       }
-      workbenchStore.replaceTerminalLines(
-        buildHydratedTerminalLines(data.events, data.messages, data.logs),
+      workbenchStore.replaceTerminalCommands(
+        buildHydratedTerminalCommands(data.events, data.messages, data.logs),
       );
 
       const nextStatus = typeof data.status === "string" ? data.status : "idle";
@@ -616,8 +652,8 @@ export default function SessionsPage() {
 
       const stepId = typeof payload.stepId === "string" ? payload.stepId : "";
       const label = typeof payload?.label === "string" ? payload.label : stepId;
-      if (label) {
-        workbenchStore.appendTerminalLine(`$ ${label}`, false);
+      if (stepId) {
+        workbenchStore.startTerminalCommand(stepId, `$ ${label}`, stepId);
       }
       if (!chatSchemaReadyRef.current && label) {
         setMessages((prev) => [
@@ -635,16 +671,20 @@ export default function SessionsPage() {
       const payload = JSON.parse((event as MessageEvent).data);
       const text = typeof payload?.text === "string" ? payload.text : "";
       if (!text) return;
-      workbenchStore.appendTerminalLine(text, Boolean(payload?.isProgress));
+      const stepId = typeof payload?.stepId === "string" ? payload.stepId : undefined;
+      workbenchStore.appendTerminalLine(text, Boolean(payload?.isProgress), stepId);
     });
 
     source.addEventListener("step:completed", (event) => {
       const payload = JSON.parse((event as MessageEvent).data);
       activeStepRef.current = null;
       setIsAgentThinking(false);
+      const stepId = typeof payload.stepId === "string" ? payload.stepId : "";
       setSteps((prev) => prev.map((s) => (s.id === payload.stepId ? { ...s, status: "completed" } : s)));
+      if (stepId) {
+        workbenchStore.completeTerminalCommand(stepId);
+      }
       if (!chatSchemaReadyRef.current) {
-        const stepId = typeof payload.stepId === "string" ? payload.stepId : "";
         const label = typeof payload?.label === "string" ? payload.label : stepId;
         if (label) {
           setMessages((prev) => [
