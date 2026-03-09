@@ -341,11 +341,16 @@ export default function SessionsPage() {
         const se: ExecuteErrorEvent[] = Array.isArray(data.executionErrors) ? data.executionErrors : [];
         setMessages(buildHydratedMessagesFallback(data.events, data.logs, ss, se));
       }
-      workbenchStore.replaceTerminalCommands(
-        buildHydratedTerminalCommands(data.events, data.messages, data.logs),
-      );
-
       const nextStatus = typeof data.status === "string" ? data.status : "idle";
+      // Only replace terminal commands when the run is no longer active.
+      // While active, the SSE stream feeds the terminal in real-time;
+      // replacing mid-stream causes rendering artefacts.
+      if (!isActive(nextStatus)) {
+        workbenchStore.replaceTerminalCommands(
+          buildHydratedTerminalCommands(data.events, data.messages, data.logs),
+        );
+      }
+
       setStatus(nextStatus);
       setSteps(mergeSteps(data.steps));
       setRequiresDdlUpload(Boolean(data.requiresDdlUpload));
@@ -625,9 +630,6 @@ export default function SessionsPage() {
 
       const stepId = typeof payload.stepId === "string" ? payload.stepId : "";
       const label = typeof payload?.label === "string" ? payload.label : stepId;
-      if (stepId) {
-        workbenchStore.startTerminalCommand(stepId, `$ ${label}`, stepId);
-      }
       if (!chatSchemaReadyRef.current && label) {
         setMessages((prev) => [
           ...prev,
@@ -640,23 +642,12 @@ export default function SessionsPage() {
       }
     });
 
-    source.addEventListener("terminal:output", (event) => {
-      const payload = JSON.parse((event as MessageEvent).data);
-      const text = typeof payload?.text === "string" ? payload.text : "";
-      if (!text) return;
-      const stepId = typeof payload?.stepId === "string" ? payload.stepId : undefined;
-      workbenchStore.appendTerminalLine(text, Boolean(payload?.isProgress), stepId);
-    });
-
     source.addEventListener("step:completed", (event) => {
       const payload = JSON.parse((event as MessageEvent).data);
       activeStepRef.current = null;
       setIsAgentThinking(false);
       const stepId = typeof payload.stepId === "string" ? payload.stepId : "";
       setSteps((prev) => prev.map((s) => (s.id === payload.stepId ? { ...s, status: "completed" } : s)));
-      if (stepId) {
-        workbenchStore.completeTerminalCommand(stepId);
-      }
       if (!chatSchemaReadyRef.current) {
         const label = typeof payload?.label === "string" ? payload.label : stepId;
         if (label) {
@@ -697,12 +688,7 @@ export default function SessionsPage() {
       reloadSidebar();
     });
 
-    source.addEventListener("log", (event) => {
-      const payload = JSON.parse((event as MessageEvent).data);
-      const message = typeof payload?.message === "string" ? payload.message.trim() : "";
-      if (!message) return;
-      workbenchStore.appendTerminalLine(message, !!payload?.is_progress);
-    });
+
 
     source.addEventListener("selfheal:iteration", (event) => {
       const payload = JSON.parse((event as MessageEvent).data);

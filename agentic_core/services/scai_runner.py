@@ -58,6 +58,14 @@ def run_scai_command_pty(
             continue
 
         raw_buf += chunk
+
+        # Broadcast raw chunk to all WebSocket terminal clients (bolt.new pattern)
+        try:
+            from python_execution_service import terminal_bridge
+            terminal_bridge.broadcast(chunk)
+        except Exception:
+            pass
+
         while "\n" in raw_buf or "\r" in raw_buf:
             cr_idx = raw_buf.find("\r")
             nl_idx = raw_buf.find("\n")

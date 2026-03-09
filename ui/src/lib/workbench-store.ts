@@ -64,6 +64,7 @@ export class WorkbenchStore {
   #selectedFile: WritableAtom<string | undefined> = atom(undefined);
   #unsavedFiles: WritableAtom<Set<string>> = atom(new Set<string>());
   #showWorkbench: WritableAtom<boolean> = atom(false);
+  #showTerminal: WritableAtom<boolean> = atom(true);
   #terminalCommands: WritableAtom<TerminalCommand[]> = atom<TerminalCommand[]>([]);
   #size = 0;
 
@@ -83,12 +84,24 @@ export class WorkbenchStore {
     return this.#showWorkbench;
   }
 
+  get showTerminal(): WritableAtom<boolean> {
+    return this.#showTerminal;
+  }
+
   get terminalCommands(): WritableAtom<TerminalCommand[]> {
     return this.#terminalCommands;
   }
 
-  get filesCount(): number {
-    return this.#size;
+  /** Flat list of all terminal lines across all commands — used by the workbench terminal pane. */
+  get allTerminalLines(): TerminalLine[] {
+    const commands = this.#terminalCommands.get();
+    const lines: TerminalLine[] = [];
+    for (const cmd of commands) {
+      for (const line of cmd.lines) {
+        lines.push(line);
+      }
+    }
+    return lines;
   }
 
   getFile(filePath: string): File | undefined {
@@ -101,6 +114,10 @@ export class WorkbenchStore {
 
   setShowWorkbench(show: boolean): void {
     this.#showWorkbench.set(show);
+  }
+
+  toggleTerminal(value?: boolean): void {
+    this.#showTerminal.set(value !== undefined ? value : !this.#showTerminal.get());
   }
 
   startTerminalCommand(id: string, label: string, stepId?: string): void {

@@ -35,3 +35,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 sqlite_store.init_schema()
 load_persisted_runs()
 register_routes(app)
+
+
+@app.on_event("startup")
+async def _init_terminal_bridge() -> None:
+    """Give the terminal bridge a reference to the running event loop."""
+    import asyncio
+    from python_execution_service import terminal_bridge
+    terminal_bridge.set_event_loop(asyncio.get_running_loop())

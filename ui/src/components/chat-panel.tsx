@@ -8,8 +8,7 @@ import { SidebarInset } from "@/components/ui/sidebar";
 import type { ChatMessage } from "@/lib/chat-types";
 import { SetupWizard } from "@/components/ui/setup-wizard";
 import { Workbench } from "@/components/workbench";
-import { InlineTerminal } from "@/components/inline-terminal";
-import { workbenchStore, type TerminalCommand, type UploadedFile } from "@/lib/workbench-store";
+import { workbenchStore, type UploadedFile } from "@/lib/workbench-store";
 
 interface ChatPanelProps {
   runId: string | null;
@@ -52,11 +51,6 @@ export function ChatPanel({
   onPickDdlFile,
   onSendAgentMessage,
 }: ChatPanelProps) {
-  const terminalCommands = React.useSyncExternalStore(
-    workbenchStore.terminalCommands.subscribe,
-    workbenchStore.terminalCommands.get,
-    workbenchStore.terminalCommands.get,
-  );
   const isSessionFinished = runId !== null && ["failed", "canceled"].includes(status);
   const isAgentPhase = status === "completed";
   const hasActiveRun = runId !== null;
@@ -154,7 +148,7 @@ export function ChatPanel({
   }, [projectId, runId, status, syncProjectFiles]);
 
   const chatMessages = React.useMemo(
-    () => messages.filter((m) => m.kind !== "step_started" && m.kind !== "step_completed" && m.kind !== "log" && m.kind !== "terminal_progress"),
+    () => messages.filter((m) => m.kind !== "step_started" && m.kind !== "step_completed" && m.kind !== "terminal_progress"),
     [messages],
   );
 
@@ -181,10 +175,9 @@ export function ChatPanel({
               </div>
             )}
 
-            {/* Chat messages area — now includes inline terminal blocks */}
+            {/* Chat messages area */}
             <ChatMessageArea
               messages={chatMessages}
-              terminalCommands={terminalCommands}
               error={error}
               isAgentThinking={isAgentThinking}
             />
@@ -273,40 +266,17 @@ function DdlUploadBanner({
 }
 
 /** Merged timeline item — either a chat message or a terminal command block */
-type TimelineItem =
-  | { type: "message"; message: ChatMessage; ts: number }
-  | { type: "terminal"; command: TerminalCommand; ts: number };
 
 function ChatMessageArea({
   messages,
-  terminalCommands,
   error,
   isAgentThinking = false,
 }: {
   messages: ChatMessage[];
-  terminalCommands: TerminalCommand[];
   error: string | null;
   isAgentThinking?: boolean;
 }) {
   const scrollRef = React.useRef<HTMLDivElement>(null);
-
-  // Build a merged chronological timeline of messages + terminal commands
-  const timeline = React.useMemo(() => {
-    const items: TimelineItem[] = [];
-
-    for (const m of messages) {
-      const ts = m.ts ? new Date(m.ts).getTime() : 0;
-      items.push({ type: "message", message: m, ts });
-    }
-
-    for (const cmd of terminalCommands) {
-      items.push({ type: "terminal", command: cmd, ts: cmd.ts });
-    }
-
-    // Sort by timestamp, preserving insertion order for equal timestamps
-    items.sort((a, b) => a.ts - b.ts);
-    return items;
-  }, [messages, terminalCommands]);
 
   React.useEffect(() => {
     const el = scrollRef.current;
@@ -315,29 +285,21 @@ function ChatMessageArea({
     if (isNearBottom) {
       el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
     }
-  }, [timeline, isAgentThinking]);
+  }, [messages, isAgentThinking]);
 
-  const hasContent = timeline.length > 0 || isAgentThinking || error;
+  const hasContent = messages.length > 0 || isAgentThinking || error;
 
   return (
     <div ref={scrollRef} className="scrollbar-dark flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-3">
       {!hasContent ? (
         <div className="flex flex-1 items-center justify-center">
-          <p className="text-sm text-white/40">Chat messages and terminal output will appear here.</p>
+          <p className="text-sm text-white/40">Chat messages will appear here.</p>
         </div>
       ) : (
         <div className="space-y-3">
-          {timeline.map((item, i) => {
-            if (item.type === "terminal") {
-              return (
-                <InlineTerminal
-                  key={`term-${item.command.id}`}
-                  command={item.command}
-                />
-              );
-            }
-            return <ChatBubble key={`msg-${item.message.id}-${i}`} message={item.message} />;
-          })}
+          {messages.map((m, i) => (
+            <ChatBubble key={`msg-${m.id}-${i}`} message={m} />
+          ))}
 
           {isAgentThinking && (
             <div className="flex justify-start">

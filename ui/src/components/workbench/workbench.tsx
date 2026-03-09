@@ -2,9 +2,10 @@
 
 import * as React from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { XCircle, ChevronLeft, ChevronRight, FileCode } from "lucide-react";
+import { XCircle, ChevronLeft, ChevronRight, FileCode, Terminal } from "lucide-react";
 import { workbenchStore, type EditorDocument } from "@/lib/workbench-store";
 import { EditorPanel } from "./editor-panel";
+import { TerminalPane } from "./terminal-pane";
 
 interface WorkbenchProps {
   chatStarted?: boolean;
@@ -26,6 +27,7 @@ export function Workbench({ chatStarted, isStreaming }: WorkbenchProps) {
   const selectedFile = useStoreValue(workbenchStore.selectedFile);
   const files = useStoreValue(workbenchStore.files);
   const unsavedFiles = useStoreValue(workbenchStore.unsavedFiles);
+  const showTerminal = useStoreValue(workbenchStore.showTerminal);
 
   // ✅ Refs to avoid stale closures + avoid putting large objects in deps
   const selectedFileRef = React.useRef<string | undefined>(selectedFile);
@@ -166,6 +168,18 @@ export function Workbench({ chatStarted, isStreaming }: WorkbenchProps) {
                   <span className="ml-2 text-xs text-white/50">({fileCount} files)</span>
                   <div className="ml-auto flex items-center gap-1">
                     <button
+                      onClick={() => workbenchStore.toggleTerminal()}
+                      className={`flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium transition-colors ${
+                        showTerminal
+                          ? "bg-white/10 text-white/90"
+                          : "text-white/60 hover:text-white hover:bg-white/5"
+                      }`}
+                      type="button"
+                    >
+                      <Terminal className="h-3.5 w-3.5" />
+                      Terminal
+                    </button>
+                    <button
                       onClick={handleClose}
                       className="p-1.5 rounded-md text-white/60 hover:text-white hover:bg-white/10"
                       type="button"
@@ -176,7 +190,7 @@ export function Workbench({ chatStarted, isStreaming }: WorkbenchProps) {
                 </div>
 
                 {/* Editor Panel */}
-                <div className="relative flex-1 overflow-hidden">
+                <div className={`relative overflow-hidden ${showTerminal ? 'flex-1 min-h-0' : 'flex-1'}`}>
                   <EditorPanel
                     editorDocument={editorDocument}
                     isStreaming={isStreaming}
@@ -189,6 +203,13 @@ export function Workbench({ chatStarted, isStreaming }: WorkbenchProps) {
                     onFileReset={handleFileReset}
                   />
                 </div>
+
+                {/* Terminal Panel */}
+                {showTerminal && (
+                  <div className="h-[240px] shrink-0 border-t border-white/10 bg-[#0a0a0a]">
+                    <TerminalPane />
+                  </div>
+                )}
               </div>
             </div>
           </motion.div>

@@ -9,7 +9,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from fastapi import File, Form, Header, HTTPException, Query, UploadFile
+from fastapi import File, Form, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 
 from python_execution_service.config import (
     CANCEL_FLAGS,
@@ -295,3 +295,46 @@ def register_routes(app) -> None:
                 await asyncio.sleep(0.25)
 
         return StreamingResponse(iterator(), media_type="text/event-stream")
+
+    # ── Terminal WebSocket (bolt.new pattern) ────────────────────
+    @app.websocket("/ws/terminal/agent")
+    async def ws_agent_terminal(websocket: WebSocket) -> None:
+        """Stream raw PTY output to the frontend terminal over WebSocket.
+
+        Exact replica of bolt.new's /ws/terminal/agent endpoint.
+        """
+        from python_execution_service import terminal_bridge
+
+        await websocket.accept()
+        q = terminal_bridge.subscribe()
+
+        async def _reader() -> None:
+            """Read from the broadcast queue and send to WebSocket."""
+            try:
+                while True:
+                    data = await q.get()
+                    if data:
+                        await websocket.send_text(data)
+            except Exception:
+                pass
+
+        reader_task = asyncio.create_task(_reader())
+
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                # Handle resize control messages (like bolt.new)
+                if raw.startswith("{"):
+                    try:
+                        msg = json.loads(raw)
+                        if msg.get("type") == "resize":
+                            # We don't have a shared PTY to resize, but keep
+                            # the interface compatible with bolt.new's store.
+                            continue
+                    except (ValueError, KeyError):
+                        pass
+        except WebSocketDisconnect:
+            pass
+        finally:
+            reader_task.cancel()
+            terminal_bridge.unsubscribe(q)

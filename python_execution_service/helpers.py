@@ -184,6 +184,20 @@ def append_terminal_output(
     append_event(run, "terminal:output", payload)
 
 
+def send_terminal_data(run: RunRecord, raw_chunk: str) -> None:
+    """Emit a raw PTY chunk to the frontend terminal.
+
+    Unlike ``append_terminal_output`` which sends parsed/cleaned lines,
+    this streams the *exact* bytes from the PTY (including ANSI codes and
+    control characters) so xterm can render them natively — identical to
+    bolt.new's WebSocket ``terminal.write(event.data)`` pattern.
+    """
+    cleaned = raw_chunk.replace("\x00", "")
+    if not cleaned:
+        return
+    append_event(run, "terminal:data", {"data": cleaned})
+
+
 def _strip_log_tags(message: str) -> str:
     return re.sub(r"^\s*(?:\[[^\]]+\]\s*)+", "", message).strip()
 
@@ -333,7 +347,12 @@ def add_log(
         sqlite_store.append_run_log(run.runId, line, created_at)
     except Exception as exc:
         logger.warning("Failed to append log for run %s: %s", run.runId, exc)
-    append_terminal_output(run, line, step_id=resolved_step_id)
+    append_chat_message(
+        run,
+        role="system",
+        kind="log",
+        content=line,
+    )
 
 
 def set_run_status(run: RunRecord, status: str, error: str | None = None) -> None:

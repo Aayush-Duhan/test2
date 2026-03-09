@@ -85,6 +85,7 @@ class MigrationContext:
     activity_log_sink: Optional[Callable[[Dict[str, Any]], None]] = None
     execution_event_sink: Optional[Callable[[Dict[str, Any]], None]] = None
     terminal_output_sink: Optional[Callable[[str, bool], None]] = None
+    raw_terminal_output_sink: Optional[Callable[[str], None]] = None
 
     report_context: Dict[str, Any] = field(default_factory=dict)
     ignored_report_codes: List[str] = field(default_factory=list)

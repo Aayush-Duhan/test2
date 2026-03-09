@@ -1,45 +1,37 @@
 "use client";
 
-import * as React from "react";
+import { useEffect, useRef } from "react";
 import { FitAddon } from "@xterm/addon-fit";
-import { Terminal } from "@xterm/xterm";
+import { Terminal as XTerm } from "@xterm/xterm";
+import { terminalStore } from "@/lib/terminal-store";
 
-import type { TerminalLine } from "@/lib/workbench-store";
+/**
+ * Workbench terminal pane — exact copy of bolt.new's Terminal.tsx pattern.
+ *
+ * Creates an xterm instance and hands it to `terminalStore.attachAgentTerminal()`.
+ * The store opens a WebSocket and does:
+ *   ws.onmessage = (event) => terminal.write(event.data)
+ *
+ * Zero React state. Zero SSE. Raw PTY bytes straight to xterm.
+ */
+export function TerminalPane() {
+  const terminalElementRef = useRef<HTMLDivElement>(null);
+  const terminalRef = useRef<XTerm | null>(null);
 
-interface TerminalPaneProps {
-  lines: TerminalLine[];
-}
+  useEffect(() => {
+    const element = terminalElementRef.current!;
+    let isMounted = true;
 
-function normalizeTerminalText(text: string): string {
-  return text.replace(/\r?\n/g, "\r\n").replace(/\u0000/g, "");
-}
+    const fitAddon = new FitAddon();
 
-export function TerminalPane({ lines }: TerminalPaneProps) {
-  const hostRef = React.useRef<HTMLDivElement>(null);
-  const terminalRef = React.useRef<Terminal | null>(null);
-  const fitAddonRef = React.useRef<FitAddon | null>(null);
-
-  React.useEffect(() => {
-    const host = hostRef.current;
-    if (!host || terminalRef.current) {
-      return;
-    }
-
-    const terminal = new Terminal({
-      allowTransparency: true,
+    const terminal = new XTerm({
+      cursorBlink: false,
       convertEol: false,
-      cursorBlink: true,
-      cursorInactiveStyle: "none",
       disableStdin: true,
-      fontFamily: '"IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
-      fontSize: 12,
-      letterSpacing: 0.2,
-      lineHeight: 1.45,
-      scrollback: 5000,
       theme: {
         background: "#0a0a0a",
         foreground: "#d7dde8",
-        cursor: "#f4d35e",
+        cursor: "#00000000",
         cursorAccent: "#0a0a0a",
         selectionBackground: "rgba(244, 211, 94, 0.22)",
         black: "#0a0a0a",
@@ -59,73 +51,52 @@ export function TerminalPane({ lines }: TerminalPaneProps) {
         brightCyan: "#b3f0ff",
         brightWhite: "#f0f6fc",
       },
+      fontSize: 12,
+      fontFamily: '"IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
+      lineHeight: 1.45,
+      letterSpacing: 0.2,
+      scrollback: 5000,
     });
-    const fitAddon = new FitAddon();
-
-    terminal.loadAddon(fitAddon);
-    terminal.open(host);
-    fitAddon.fit();
-
-    const observer = new ResizeObserver(() => {
-      fitAddon.fit();
-    });
-    observer.observe(host);
 
     terminalRef.current = terminal;
-    fitAddonRef.current = fitAddon;
+    terminal.loadAddon(fitAddon);
+    terminal.open(element);
+
+    // Fit after layout settles (same as bolt.new)
+    const fitTerminal = () => {
+      if (!isMounted || terminalRef.current !== terminal) return;
+      if (element.offsetWidth > 0 && element.offsetHeight > 0) {
+        try {
+          fitAddon.fit();
+        } catch {
+          /* skip */
+        }
+        // Notify store of terminal resize (for WebSocket resize message)
+        terminalStore.onAgentTerminalResize(terminal.cols, terminal.rows);
+      }
+    };
+    setTimeout(fitTerminal, 0);
+
+    const resizeObserver = new ResizeObserver(fitTerminal);
+    resizeObserver.observe(element);
+
+    // Attach via WebSocket — bolt.new's pattern:
+    // ws.onmessage = (event) => terminal.write(event.data)
+    terminalStore.attachAgentTerminal(terminal);
 
     return () => {
-      observer.disconnect();
+      isMounted = false;
+      resizeObserver.disconnect();
+      terminalStore.detachAgentTerminal(terminal);
       terminal.dispose();
-      terminalRef.current = null;
-      fitAddonRef.current = null;
     };
   }, []);
 
-  React.useEffect(() => {
-    const terminal = terminalRef.current;
-    const fitAddon = fitAddonRef.current;
-    if (!terminal || !fitAddon) {
-      return;
-    }
-
-    terminal.reset();
-
-    if (lines.length === 0) {
-      terminal.writeln("\x1b[90mWaiting for agent commands...\x1b[0m");
-      fitAddon.fit();
-      return;
-    }
-
-    let previousWasProgress = false;
-
-    for (const line of lines) {
-      const text = normalizeTerminalText(line.text);
-      if (!text) {
-        continue;
-      }
-
-      if (line.isProgress) {
-        terminal.write("\r\x1b[2K");
-        terminal.write(text);
-        previousWasProgress = true;
-        continue;
-      }
-
-      if (previousWasProgress) {
-        terminal.write("\r\n");
-        previousWasProgress = false;
-      }
-
-      terminal.write(text);
-      if (!text.endsWith("\r") && !text.endsWith("\n")) {
-        terminal.write("\r\n");
-      }
-    }
-
-    fitAddon.fit();
-    terminal.scrollToBottom();
-  }, [lines]);
-
-  return <div ref={hostRef} className="h-full w-full px-3 py-2" />;
+  return (
+    <div
+      ref={terminalElementRef}
+      className="h-full w-full px-3 py-2"
+      onWheel={(e) => e.stopPropagation()}
+    />
+  );
 }
