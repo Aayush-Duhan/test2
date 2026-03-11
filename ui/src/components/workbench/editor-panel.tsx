@@ -1,17 +1,37 @@
 "use client";
 
-import * as React from "react";
+/**
+ * EditorPanel — resizable editor + file tree + terminal layout.
+ *
+ * Port of bolt.new's EditorPanel using react-resizable-panels for:
+ * - Horizontal: file tree ↔ editor (resizable)
+ * - Vertical: editor ↔ terminal (resizable, collapsible)
+ */
+
+import { useStore } from '@nanostores/react';
+import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
+import {
+  Panel,
+  Group,
+  Separator,
+  usePanelRef,
+  type PanelImperativeHandle,
+} from 'react-resizable-panels';
 import {
   FolderTree,
   Save,
   RotateCcw,
-  FileCode,
-} from "lucide-react";
-
-import type { FileMap, EditorDocument } from "@/lib/workbench-store";
-import { cn } from "@/lib/utils";
-import { FileTree } from "./file-tree";
-import { CodeMirrorEditor } from "./codemirror/CodeMirrorEditor";
+  Terminal as TerminalIcon,
+  ChevronDown,
+} from 'lucide-react';
+import type { FileMap } from '@/lib/stores/files-store';
+import type { EditorDocument } from '@/lib/stores/editor-store';
+import { workbenchStore } from '@/lib/workbench-store';
+import { cn } from '@/lib/utils';
+import { FileBreadcrumb } from './file-breadcrumb';
+import { FileTree } from './file-tree';
+import { TerminalPane, type TerminalRef } from './terminal-pane';
+import { CodeMirrorEditor } from './codemirror/CodeMirrorEditor';
 
 interface EditorPanelProps {
   files?: FileMap;
@@ -19,200 +39,231 @@ interface EditorPanelProps {
   editorDocument?: EditorDocument;
   selectedFile?: string;
   isStreaming?: boolean;
+  onEditorChange?: (update: { content: string }) => void;
+  onEditorScroll?: (position: { top: number; left: number }) => void;
   onFileSelect?: (value?: string) => void;
-  onEditorChange?: (content: string) => void;
   onFileSave?: () => void;
   onFileReset?: () => void;
 }
 
-export function EditorPanel({
-  files,
-  unsavedFiles,
-  editorDocument,
-  selectedFile,
-  isStreaming,
-  onFileSelect,
-  onEditorChange,
-  onFileSave,
-  onFileReset,
-}: EditorPanelProps) {
-  const filePath = editorDocument?.filePath;
+const DEFAULT_TERMINAL_SIZE = 25;
+const DEFAULT_EDITOR_SIZE = 100 - DEFAULT_TERMINAL_SIZE;
 
-  const activeFileSegments = React.useMemo(() => {
-    if (!filePath) return undefined;
-    return filePath.split("/");
-  }, [filePath]);
+const editorSettings = { tabSize: 2, fontSize: '13px' };
 
-  const activeFileUnsaved = React.useMemo(() => {
-    return !!filePath && !!unsavedFiles?.has(filePath);
-  }, [filePath, unsavedFiles]);
+export const EditorPanel = memo(
+  ({
+    files,
+    unsavedFiles,
+    editorDocument,
+    selectedFile,
+    isStreaming,
+    onFileSelect,
+    onEditorChange,
+    onEditorScroll,
+    onFileSave,
+    onFileReset,
+  }: EditorPanelProps) => {
+    const showTerminal = useStore(workbenchStore.showTerminal);
 
-  // ✅ Memoize settings so CodeMirror doesn't reconfigure on every render
-  const editorSettings = React.useMemo(
-    () => ({
-      fontSize: "13px",
-      tabSize: 2,
-    }),
-    []
-  );
+    const terminalRef = useRef<TerminalRef | null>(null);
+    const terminalPanelRef = usePanelRef();
+    const terminalToggledByShortcut = useRef(false);
 
-  // ✅ Debounce store updates to reduce rerender pressure
-  const changeTimer = React.useRef<number | null>(null);
+    const activeFileSegments = useMemo(() => {
+      if (!editorDocument) {
+        return undefined;
+      }
+      return editorDocument.filePath.split('/');
+    }, [editorDocument]);
 
-  const handleEditorChange = React.useCallback(
-    (update: { content: string }) => {
-      if (!onEditorChange) return;
+    const activeFileUnsaved = useMemo(() => {
+      return editorDocument !== undefined && unsavedFiles?.has(editorDocument.filePath);
+    }, [editorDocument, unsavedFiles]);
 
-      if (changeTimer.current) window.clearTimeout(changeTimer.current);
-      changeTimer.current = window.setTimeout(() => {
-        onEditorChange(update.content);
-      }, 120);
-    },
-    [onEditorChange]
-  );
+    useEffect(() => {
+      const terminal = terminalPanelRef.current;
 
-  React.useEffect(() => {
-    return () => {
-      if (changeTimer.current) window.clearTimeout(changeTimer.current);
-    };
-  }, []);
+      if (!terminal) {
+        return;
+      }
 
-  const handleEditorSave = React.useCallback(() => {
-    if (isStreaming) return;
-    onFileSave?.();
-  }, [onFileSave, isStreaming]);
+      const isCollapsed = terminal.isCollapsed();
 
-  const canSaveOrReset = !!editorDocument && activeFileUnsaved && !isStreaming;
+      if (!showTerminal && !isCollapsed) {
+        terminal.collapse();
+      } else if (showTerminal && isCollapsed) {
+        terminal.resize(DEFAULT_TERMINAL_SIZE);
+      }
 
-  return (
-    <div className="flex h-full flex-col">
-      {/* Main content area with file tree and editor */}
-      <div className="flex flex-1 min-h-0">
-        {/* File tree sidebar */}
-        <div className="w-56 min-w-48 border-r border-white/10 flex flex-col bg-[#0d0d0d]">
-          <div className="flex items-center gap-2 px-3 py-2 border-b border-white/10 text-xs font-medium text-white/70">
-            <FolderTree className="h-3.5 w-3.5" />
-            Files
-          </div>
-          <div className="flex-1 overflow-y-auto">
-            <FileTree
-              className="h-full py-1"
-              files={files}
-              hideRoot
-              unsavedFiles={unsavedFiles}
-              rootFolder="/project"
-              selectedFile={selectedFile}
-              onFileSelect={onFileSelect}
-            />
-          </div>
-        </div>
+      terminalToggledByShortcut.current = false;
+    }, [showTerminal, terminalPanelRef]);
 
-        {/* Editor area */}
-        <div className="flex-1 flex flex-col min-w-0">
-          {/* Breadcrumb header */}
-          <div className="flex items-center gap-2 px-3 py-2 border-b border-white/10 bg-[#0d0d0d] overflow-x-auto">
-            {activeFileSegments?.length ? (
-              <div className="flex items-center gap-2 text-sm text-white/70 min-w-0 w-full">
-                <FileCode className="h-3.5 w-3.5 shrink-0" />
+    const handleEditorChange = useCallback(
+      (update: { content: string }) => {
+        onEditorChange?.(update);
+      },
+      [onEditorChange],
+    );
 
-                <div className="flex items-center gap-1 min-w-0">
-                  {activeFileSegments.map((segment, index) => (
-                    <React.Fragment key={index}>
-                      {index > 0 && <span className="text-white/40">/</span>}
-                      <span
-                        className={cn(
-                          "truncate max-w-32",
-                          index === activeFileSegments.length - 1 ? "text-white" : "text-white/60"
-                        )}
-                        title={segment}
-                      >
-                        {segment}
-                      </span>
-                    </React.Fragment>
-                  ))}
+    const handleEditorSave = useCallback(() => {
+      if (isStreaming) return;
+      onFileSave?.();
+    }, [onFileSave, isStreaming]);
+
+    const canSaveOrReset = !!editorDocument && activeFileUnsaved && !isStreaming;
+
+    return (
+      <Group orientation="vertical">
+        <Panel defaultSize={showTerminal ? DEFAULT_EDITOR_SIZE : 100} minSize={20}>
+          <Group orientation="horizontal">
+            <Panel defaultSize={20} minSize={10} collapsible>
+              <div className="flex flex-col border-r border-white/10 h-full bg-[#0d0d0d]">
+                <div className="flex items-center gap-2 px-3 py-2 border-b border-white/10 text-xs font-medium text-white/70">
+                  <FolderTree className="h-3.5 w-3.5" />
+                  Files
                 </div>
-
-                {/* Right actions */}
-                <div className="ml-auto flex items-center gap-2 shrink-0">
-                  {isStreaming && (
-                    <span className="text-xs px-2 py-1 rounded bg-white/10 text-white/70">
-                      Streaming…
-                    </span>
-                  )}
-
-                  {activeFileUnsaved && (
-                    <span className="text-xs text-yellow-300/90" title="Unsaved changes">
-                      ●
-                    </span>
-                  )}
-
-                  <button
-                    onClick={onFileSave}
-                    disabled={!canSaveOrReset}
-                    className={cn(
-                      "flex items-center gap-1 px-2 py-1 text-xs rounded",
-                      canSaveOrReset
-                        ? "hover:bg-white/10 text-white/70 hover:text-white"
-                        : "opacity-40 cursor-not-allowed"
-                    )}
-                  >
-                    <Save className="h-3 w-3" />
-                    Save
-                  </button>
-
-                  <button
-                    onClick={onFileReset}
-                    disabled={!canSaveOrReset}
-                    className={cn(
-                      "flex items-center gap-1 px-2 py-1 text-xs rounded",
-                      canSaveOrReset
-                        ? "hover:bg-white/10 text-white/70 hover:text-white"
-                        : "opacity-40 cursor-not-allowed"
-                    )}
-                  >
-                    <RotateCcw className="h-3 w-3" />
-                    Reset
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <span className="text-sm text-white/40">Select a file to view</span>
-            )}
-          </div>
-
-          {/* Code editor */}
-          <div className="flex-1 overflow-hidden bg-[#0a0a0a] relative">
-            {editorDocument ? (
-              editorDocument.isBinary ? (
-                <div className="flex items-center justify-center h-full text-white/50">
-                  <p>Binary file - cannot display</p>
-                </div>
-              ) : (
-                <>
-                  <CodeMirrorEditor
-                    doc={editorDocument}
-                    editable={!isStreaming}
-                    onChange={handleEditorChange}
-                    onSave={handleEditorSave}
-                    settings={editorSettings}
-                    placeholderText="Type here…"
-                    debounceMs={0} // Debounce already handled in panel
+                <div className="flex-1 overflow-y-auto">
+                  <FileTree
+                    className="h-full py-1"
+                    files={files}
+                    hideRoot
+                    unsavedFiles={unsavedFiles}
+                    rootFolder="/project"
+                    selectedFile={selectedFile}
+                    onFileSelect={onFileSelect}
                   />
-
-                  {/* Optional overlay while streaming */}
-                  {isStreaming && (
-                    <div className="absolute inset-0 pointer-events-none bg-black/10" />
-                  )}
-                </>
-              )
-            ) : (
-              <div className="flex items-center justify-center h-full text-white/40">
-                <p>No file selected</p>
+                </div>
               </div>
-            )}
+            </Panel>
+            <Separator />
+            <Panel className="flex flex-col" defaultSize={80} minSize={20}>
+              {/* Breadcrumb header */}
+              <div className="flex items-center gap-2 px-3 py-2 border-b border-white/10 bg-[#0d0d0d] overflow-x-auto">
+                {activeFileSegments?.length ? (
+                  <div className="flex items-center flex-1 text-sm">
+                    <FileBreadcrumb
+                      pathSegments={activeFileSegments}
+                      files={files}
+                      onFileSelect={onFileSelect}
+                    />
+                    {activeFileUnsaved && (
+                      <div className="flex gap-1 ml-auto -mr-1.5">
+                        <button
+                          onClick={onFileSave}
+                          disabled={!canSaveOrReset}
+                          className={cn(
+                            'flex items-center gap-1 px-2 py-1 text-xs rounded',
+                            canSaveOrReset
+                              ? 'hover:bg-white/10 text-white/70 hover:text-white'
+                              : 'opacity-40 cursor-not-allowed',
+                          )}
+                          type="button"
+                        >
+                          <Save className="h-3 w-3" />
+                          Save
+                        </button>
+                        <button
+                          onClick={onFileReset}
+                          disabled={!canSaveOrReset}
+                          className={cn(
+                            'flex items-center gap-1 px-2 py-1 text-xs rounded',
+                            canSaveOrReset
+                              ? 'hover:bg-white/10 text-white/70 hover:text-white'
+                              : 'opacity-40 cursor-not-allowed',
+                          )}
+                          type="button"
+                        >
+                          <RotateCcw className="h-3 w-3" />
+                          Reset
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-sm text-white/40">Select a file to view</span>
+                )}
+              </div>
+              {/* Code editor */}
+              <div className="h-full flex-1 overflow-hidden bg-[#0a0a0a] relative">
+                {editorDocument ? (
+                  editorDocument.isBinary ? (
+                    <div className="flex items-center justify-center h-full text-white/50">
+                      <p>Binary file — cannot display</p>
+                    </div>
+                  ) : (
+                    <>
+                      <CodeMirrorEditor
+                        doc={editorDocument}
+                        editable={!isStreaming && editorDocument !== undefined}
+                        settings={editorSettings}
+                        onChange={handleEditorChange}
+                        onSave={handleEditorSave}
+                        placeholderText="Type here…"
+                        debounceMs={0}
+                      />
+                      {isStreaming && (
+                        <div className="absolute inset-0 pointer-events-none bg-black/10" />
+                      )}
+                    </>
+                  )
+                ) : (
+                  <div className="flex items-center justify-center h-full text-white/40">
+                    <p>No file selected</p>
+                  </div>
+                )}
+              </div>
+            </Panel>
+          </Group>
+        </Panel>
+        <Separator />
+        <Panel
+          panelRef={terminalPanelRef}
+          defaultSize={showTerminal ? DEFAULT_TERMINAL_SIZE : 0}
+          minSize={10}
+          collapsible
+          onResize={(panelSize) => {
+            const isCollapsed = panelSize.asPercentage < 1;
+            if (!terminalToggledByShortcut.current) {
+              if (isCollapsed) {
+                workbenchStore.toggleTerminal(false);
+              } else {
+                workbenchStore.toggleTerminal(true);
+              }
+            }
+          }}
+        >
+          <div className="h-full">
+            <div className="bg-[#0a0a0a] h-full flex flex-col">
+              <div className="flex items-center border-y border-white/10 gap-1.5 min-h-[34px] p-2 bg-[#0d0d0d]">
+                <button
+                  className="flex items-center text-sm cursor-pointer gap-1.5 px-3 py-1.5 h-full whitespace-nowrap rounded-full bg-white/10 text-white/90"
+                  type="button"
+                >
+                  <TerminalIcon className="h-3.5 w-3.5" />
+                  AI Agent
+                </button>
+                <button
+                  className="ml-auto p-1.5 rounded-md text-white/60 hover:text-white hover:bg-white/10"
+                  title="Close"
+                  type="button"
+                  onClick={() => workbenchStore.toggleTerminal(false)}
+                >
+                  <ChevronDown className="h-4 w-4" />
+                </button>
+              </div>
+              <TerminalPane
+                key="agent-terminal"
+                className="h-full overflow-hidden"
+                ref={terminalRef}
+                readonly
+              />
+            </div>
           </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+        </Panel>
+      </Group>
+    );
+  },
+);
+
+EditorPanel.displayName = 'EditorPanel';

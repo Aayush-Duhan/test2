@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { getProject, getSchema, getSource } from "@/lib/storage";
 import { listPythonRuns, startPythonRun } from "@/lib/python-execution-client";
 import { handlePythonResponse, withErrorHandling } from "@/lib/api-utils";
+import { createScopedLogger } from "@/lib/logger";
+
+const logger = createScopedLogger('api/runs');
 
 export const runtime = "nodejs";
 
@@ -113,7 +116,7 @@ export async function POST(request: Request) {
 
     if (!response.ok && response.status === 422) {
       const detail = await response.clone().text().catch(() => "unable to read response body");
-      console.error("[api/runs] Python /v1/runs/start returned 422", {
+      logger.error("Python /v1/runs/start returned 422", {
         payload: pythonPayload,
         responseBody: detail,
       });

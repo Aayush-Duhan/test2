@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, ArrowDown } from "lucide-react";
 import { PromptBox } from "@/components/ui/chatgpt-prompt-input";
 import AgentPlan, { type Task } from "@/components/ui/agent-plan";
 import { SidebarInset } from "@/components/ui/sidebar";
@@ -9,6 +9,10 @@ import type { ChatMessage } from "@/lib/chat-types";
 import { SetupWizard } from "@/components/ui/setup-wizard";
 import { Workbench } from "@/components/workbench";
 import { workbenchStore, type UploadedFile } from "@/lib/workbench-store";
+import { createScopedLogger } from "@/lib/logger";
+import { useSnapScroll } from "@/hooks/useSnapScroll";
+
+const logger = createScopedLogger('ChatPanel');
 
 interface ChatPanelProps {
   runId: string | null;
@@ -117,7 +121,7 @@ export function ChatPanel({
         workbenchStore.addUploadedFiles(files);
       }
     } catch (syncError) {
-      console.error("Failed to sync project files:", syncError);
+      logger.error("Failed to sync project files:", syncError);
     }
   }, []);
 
@@ -276,47 +280,53 @@ function ChatMessageArea({
   error: string | null;
   isAgentThinking?: boolean;
 }) {
-  const scrollRef = React.useRef<HTMLDivElement>(null);
-
-  React.useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-    if (isNearBottom) {
-      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-    }
-  }, [messages, isAgentThinking]);
+  const [messageRef, scrollRef, isAtBottom, scrollToBottom] = useSnapScroll();
 
   const hasContent = messages.length > 0 || isAgentThinking || error;
 
   return (
-    <div ref={scrollRef} className="scrollbar-dark flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-3">
-      {!hasContent ? (
-        <div className="flex flex-1 items-center justify-center">
-          <p className="text-sm text-white/40">Chat messages will appear here.</p>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {messages.map((m, i) => (
-            <ChatBubble key={`msg-${m.id}-${i}`} message={m} />
-          ))}
+    <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div ref={scrollRef} className="scrollbar-dark flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-3">
+        {!hasContent ? (
+          <div className="flex flex-1 items-center justify-center">
+            <p className="text-sm text-white/40">Chat messages will appear here.</p>
+          </div>
+        ) : (
+          <div ref={messageRef} className="space-y-3">
+            {messages.map((m, i) => (
+              <ChatBubble key={`msg-${m.id}-${i}`} message={m} />
+            ))}
 
-          {isAgentThinking && (
-            <div className="flex justify-start">
-              <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/70">
-                Agent is working...
+            {isAgentThinking && (
+              <div className="flex items-center gap-2 py-1 text-sm text-white/50">
+                <span className="inline-flex gap-1">
+                  <span className="animate-bounce" style={{ animationDelay: '0ms' }}>·</span>
+                  <span className="animate-bounce" style={{ animationDelay: '150ms' }}>·</span>
+                  <span className="animate-bounce" style={{ animationDelay: '300ms' }}>·</span>
+                </span>
+                <span>Agent is working</span>
               </div>
-            </div>
-          )}
+            )}
 
-          {error && (
-            <div className="flex justify-start">
-              <div className="max-w-[90%] whitespace-pre-wrap rounded-2xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm leading-relaxed text-red-100">
+            {error && (
+              <div className="border-l-2 border-red-400/60 pl-3 text-sm leading-relaxed text-red-200">
                 {error}
               </div>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Scroll-to-bottom FAB */}
+      {!isAtBottom && (
+        <button
+          type="button"
+          onClick={scrollToBottom}
+          className="absolute bottom-3 right-5 flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-[#252525] text-white/70 shadow-lg transition-all hover:bg-[#303030] hover:text-white"
+          aria-label="Scroll to bottom"
+        >
+          <ArrowDown className="h-4 w-4" />
+        </button>
       )}
     </div>
   );
@@ -324,46 +334,38 @@ function ChatMessageArea({
 
 function ChatBubble({ message: m }: { message: ChatMessage }) {
   const isUser = m.role === "user";
-  const isSystem = m.role === "system";
   const isError = m.role === "error";
   const isSqlRow = m.kind === "sql_statement" || m.kind === "sql_error";
 
   if (isSqlRow && m.sql) {
-    const rowClass = isError
-      ? "border border-red-400/30 bg-red-500/10 text-red-100"
-      : "border border-white/10 bg-[#1f1f1f] text-white/92";
-
     return (
-      <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-        <details className={`group max-w-[90%] rounded-2xl px-3 py-2 ${rowClass}`}>
-          <summary className="flex cursor-pointer list-none items-center gap-2 text-sm leading-relaxed">
-            <ChevronRight className="h-4 w-4 shrink-0 transition-transform group-open:rotate-90" />
-            <span className="font-medium">{m.content}</span>
-          </summary>
-          <div className="mt-3 space-y-2 border-t border-white/10 pt-3">
-            {m.sql.statement && <SqlBlockSection title="Query" content={m.sql.statement} />}
-            {m.sql.failedStatement && <SqlBlockSection title="Query" content={m.sql.failedStatement} />}
-            {m.sql.output && <SqlBlockSection title="Output" content={m.sql.output} />}
-            {m.sql.error && <SqlBlockSection title="Error" content={m.sql.error} isError />}
-          </div>
-        </details>
-      </div>
+      <details className="group">
+        <summary className="flex cursor-pointer list-none items-center gap-2 text-sm leading-relaxed text-white/80 hover:text-white/95">
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-white/40 transition-transform group-open:rotate-90" />
+          <span className={isError ? "text-red-300" : "text-white/80"}>{m.content}</span>
+        </summary>
+        <div className="ml-5 mt-2 space-y-2 border-l border-white/10 pl-3">
+          {m.sql.statement && <SqlBlockSection title="Query" content={m.sql.statement} />}
+          {m.sql.failedStatement && <SqlBlockSection title="Query" content={m.sql.failedStatement} />}
+          {m.sql.output && <SqlBlockSection title="Output" content={m.sql.output} />}
+          {m.sql.error && <SqlBlockSection title="Error" content={m.sql.error} isError />}
+        </div>
+      </details>
     );
   }
 
-  const bubbleClass = isUser
-    ? "bg-blue-500/85 text-white"
+  const textClass = isUser
+    ? "text-blue-300"
     : isError
-      ? "border border-red-400/30 bg-red-500/10 text-red-100"
-      : isSystem
-        ? "border border-white/10 bg-white/5 text-white/80"
-        : "border border-white/10 bg-[#1f1f1f] text-white/92";
+      ? "text-red-300"
+      : "text-white/85";
+
+  const prefix = isUser ? "You" : isError ? "Error" : null;
 
   return (
-    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-      <div className={`max-w-[90%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-relaxed ${bubbleClass}`}>
-        {buildPlainMessageBody(m)}
-      </div>
+    <div className={`whitespace-pre-wrap text-sm leading-relaxed ${textClass}`}>
+      {prefix && <span className="mr-2 text-xs font-semibold uppercase tracking-wider opacity-50">{prefix}</span>}
+      {buildPlainMessageBody(m)}
     </div>
   );
 }

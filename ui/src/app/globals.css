@@ -313,3 +313,33 @@
   0% { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }
 }
+
+/* Workbench panel sizing */
+:root {
+  --workbench-width: 50%;
+  --workbench-inner-width: calc(var(--workbench-width) - 1.75rem);
+}
+
+/* Workbench z-index */
+.z-workbench { z-index: 40; }
+.z-file-tree-breadcrumb { z-index: 50; }
+
+/* react-resizable-panels resize handles */
+[data-panel-group-direction=horizontal] > [data-resize-handle] {
+  width: 4px;
+  background: transparent;
+  transition: background 0.15s;
+}
+[data-panel-group-direction=horizontal] > [data-resize-handle]:hover,
+[data-panel-group-direction=horizontal] > [data-resize-handle][data-resize-handle-active] {
+  background: rgba(255, 255, 255, 0.12);
+}
+[data-panel-group-direction=vertical] > [data-resize-handle] {
+  height: 4px;
+  background: transparent;
+  transition: background 0.15s;
+}
+[data-panel-group-direction=vertical] > [data-resize-handle]:hover,
+[data-panel-group-direction=vertical] > [data-resize-handle][data-resize-handle-active] {
+  background: rgba(255, 255, 255, 0.12);
+}

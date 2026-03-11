@@ -5,6 +5,8 @@ pandas
 fastapi
 uvicorn
 python-multipart
+websockets
+pywinpty
 
 # LangGraph Dependencies (for agentic flow)
 langgraph
