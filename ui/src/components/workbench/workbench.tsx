@@ -116,8 +116,8 @@ export const Workbench = memo(({ chatStarted, isStreaming }: WorkbenchProps) => 
         className="z-workbench h-full shrink-0 overflow-hidden"
         style={{ pointerEvents: showWorkbench ? 'auto' : 'none' }}
       >
-        <div className="h-full box-border py-4 pr-4 pl-3">
-          <div className="h-full w-[var(--workbench-inner-width)] max-w-full ml-auto">
+        <div className="h-full box-border py-3 pr-3 pl-1">
+          <div className="h-full w-full">
             <div className="h-full flex flex-col bg-[#0d0d0d] border border-white/10 shadow-lg rounded-lg overflow-hidden">
               {/* Header */}
               <div className="flex items-center px-3 py-2 border-b border-white/10 bg-[#0a0a0a]">
