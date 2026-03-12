@@ -1,7 +1,12 @@
-"""Snowflake Cortex chat model wrapper for the orchestration agent."""
+"""Direct Snowflake Cortex API wrapper — bypasses LangChain ChatSnowflakeCortex.
+
+Calls snowflake.cortex.complete() via Snowpark SQL, giving us full control
+over message formatting and avoiding the bind_tools/ToolNode incompatibility.
+"""
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from typing import Any, Optional
@@ -11,7 +16,6 @@ from agentic_core.runtime.snowflake_session import get_snowflake_session
 
 logger = logging.getLogger(__name__)
 
-# Default model for the orchestration agent
 DEFAULT_AGENT_MODEL = "claude-4-sonnet"
 
 
@@ -25,42 +29,93 @@ def get_agent_model_name() -> str:
     ).strip() or DEFAULT_AGENT_MODEL
 
 
-def create_cortex_chat_model(
-    state: MigrationContext,
-    *,
-    model: str | None = None,
-    temperature: float = 0,
-):
-    """Create a ChatSnowflakeCortex instance for the agent.
-
-    Returns the chat model and the Snowflake session (caller must close session).
-    """
-    try:
-        from langchain_community.chat_models import ChatSnowflakeCortex
-    except ImportError as exc:
-        raise RuntimeError(
-            "langchain-community is required for the agent. "
-            "Install with: pip install langchain-community"
-        ) from exc
-
+def get_cortex_session(state: MigrationContext):
+    """Get a Snowpark session for Cortex calls."""
     session = get_snowflake_session(state)
     if session is None:
         raise RuntimeError(
             "Failed to create Snowflake session for agent. "
             "Check Snowflake credentials (account, user, role, warehouse)."
         )
+    return session
 
+
+def call_cortex_complete(
+    session: Any,
+    messages: list[dict[str, str]],
+    *,
+    model: str | None = None,
+    temperature: float = 0,
+    max_tokens: int = 4096,
+    top_p: float = 0,
+) -> str:
+    """Call snowflake.cortex.complete() directly and return the response text.
+
+    Args:
+        session: Snowpark session.
+        messages: List of {"role": "system"|"user"|"assistant", "content": "..."}.
+        model: Cortex model name.
+        temperature: Sampling temperature.
+        max_tokens: Maximum response tokens.
+        top_p: Top-p sampling parameter.
+
+    Returns:
+        The assistant response text.
+    """
     model_name = model or get_agent_model_name()
-    cortex_function = (
-        os.getenv("SNOWFLAKE_CORTEX_FUNCTION") or "complete"
-    ).strip() or "complete"
 
-    chat_model = ChatSnowflakeCortex(
-        model=model_name,
-        cortex_function=cortex_function,
-        session=session,
-        temperature=temperature,
-    )
+    # Sanitize messages — Cortex only accepts system/user/assistant
+    sanitized = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        if role not in ("system", "user", "assistant"):
+            role = "user"
+        content = msg.get("content", "")
+        sanitized.append({"role": role, "content": content})
 
-    logger.info("Created Cortex chat model: model=%s, function=%s", model_name, cortex_function)
-    return chat_model, session
+    # Ensure proper role alternation: after system, must have user
+    # Adjacent messages with same role need to be merged
+    merged: list[dict[str, str]] = []
+    for msg in sanitized:
+        if merged and merged[-1]["role"] == msg["role"]:
+            # Merge with previous message of same role
+            merged[-1]["content"] += "\n\n" + msg["content"]
+        else:
+            merged.append(dict(msg))
+
+    # Cortex requires at least a user message after system
+    if len(merged) == 1 and merged[0]["role"] == "system":
+        merged.append({"role": "user", "content": "Begin the migration process now."})
+
+    # If last message is system, add a user prompt
+    if merged and merged[-1]["role"] == "system":
+        merged.append({"role": "user", "content": "Please proceed."})
+
+    message_json = json.dumps(merged)
+    options = {
+        "temperature": temperature,
+        "top_p": top_p,
+        "max_tokens": max_tokens,
+    }
+    options_json = json.dumps(options)
+
+    sql_stmt = f"""
+        SELECT snowflake.cortex.complete(
+            '{model_name}',
+            parse_json($${message_json}$$),
+            parse_json($${options_json}$$)
+        ) AS llm_response;
+    """
+
+    try:
+        # Ensure warehouse is active
+        warehouse = session.get_current_warehouse()
+        if warehouse:
+            session.sql(f"USE WAREHOUSE {warehouse};").collect()
+
+        rows = session.sql(sql_stmt).collect()
+    except Exception as exc:
+        raise RuntimeError(f"Cortex complete() call failed: {exc}") from exc
+
+    response = json.loads(rows[0]["LLM_RESPONSE"])
+    return response["choices"][0]["messages"]

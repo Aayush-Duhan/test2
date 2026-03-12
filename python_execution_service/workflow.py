@@ -226,15 +226,9 @@ def execute_run_sync(run_id: str) -> None:  # noqa: C901
         _perf_log(run, "AGENT_BUILD_END")
 
         _perf_log(run, "AGENT_RUN_START")
-        initial_state = {
-            "context": context,
-            "messages": [],
-            "iteration_count": 0,
-            "is_complete": False,
-            "should_stop": False,
-        }
-
-        final_state = agent_graph.invoke(initial_state)
+        # The agent_graph is a dict with _run_fn — call it directly
+        run_fn = agent_graph["_run_fn"]
+        run_fn()
         _perf_log(run, "AGENT_RUN_END")
 
         # ── Process final state ────────────────────────────────
