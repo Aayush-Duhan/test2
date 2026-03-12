@@ -189,10 +189,7 @@ function getInitialState(): WizardState {
   };
 }
 
-function getVisibleStepsForState(wizard: WizardState): readonly (typeof WIZARD_STEPS)[number][] {
-  if (!wizard.sourceLanguage) {
-    return WIZARD_STEPS.filter((step) => step.id !== 'scriptType');
-  }
+function getVisibleStepsForState(_wizard: WizardState): readonly (typeof WIZARD_STEPS)[number][] {
   return WIZARD_STEPS;
 }
 

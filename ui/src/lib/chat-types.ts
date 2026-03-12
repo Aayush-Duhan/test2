@@ -45,7 +45,10 @@ export type ChatMessageKind =
   | "terminal_progress"
   | "sql_statement"
   | "sql_error"
-  | "run_status";
+  | "run_status"
+  | "agent_response"
+  | "user_input"
+  | "agent_thinking";
 
 export type ChatSqlDetails = {
   statement?: string;

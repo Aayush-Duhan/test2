@@ -21,6 +21,7 @@ from python_execution_service.config import (
     RUNS,
     STEP_LABELS,
     THINKING_STEP_IDS,
+    USER_MESSAGE_QUEUES,
 )
 from python_execution_service.models import RunRecord, RunStep, StartRunRequest
 
@@ -80,6 +81,8 @@ def _deserialize_run_record(payload: dict[str, Any]) -> RunRecord:
         executionEventCursor=int(payload.get("executionEventCursor", 0)),
         events=payload.get("events", []),
         messages=payload.get("messages", []),
+        userMessageQueue=payload.get("userMessageQueue", []),
+        conversationHistory=payload.get("conversationHistory", []),
     )
 
 
@@ -398,3 +401,30 @@ def _request_from_run(existing: RunRecord) -> StartRunRequest:
         sfSchema=existing.sfSchema,
         sfAuthenticator=existing.sfAuthenticator,
     )
+
+
+# ── User message queue helpers ──────────────────────────────────
+
+def push_user_message(run_id: str, message: str) -> None:
+    """Queue a user message for the running agent to pick up."""
+    with RUN_LOCK:
+        if run_id not in USER_MESSAGE_QUEUES:
+            USER_MESSAGE_QUEUES[run_id] = []
+        USER_MESSAGE_QUEUES[run_id].append(message)
+        run = RUNS.get(run_id)
+        if run:
+            run.userMessageQueue.append(message)
+            persist_runs_locked()
+
+
+def pop_user_message(run_id: str) -> str | None:
+    """Pop the next user message from the queue for a run."""
+    with RUN_LOCK:
+        queue = USER_MESSAGE_QUEUES.get(run_id, [])
+        if queue:
+            msg = queue.pop(0)
+            run = RUNS.get(run_id)
+            if run and run.userMessageQueue:
+                run.userMessageQueue.pop(0)
+            return msg
+    return None

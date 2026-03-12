@@ -95,6 +95,10 @@ export async function resumePythonRun(payload: {
   });
 }
 
+export async function sendChatMessage(runId: string, message: string) {
+  return request(`/v1/runs/${runId}/chat`, { method: "POST", body: { message } });
+}
+
 export async function getPythonRunEvents(runId: string, lastEventId?: string | null) {
   const headers: Record<string, string> = {
     "X-Execution-Token": executionToken,

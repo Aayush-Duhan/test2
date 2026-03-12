@@ -79,6 +79,8 @@ class RunRecord:
     outputDir: str = ""
     ddlUploadPath: str = ""
     executionEventCursor: int = 0
+    userMessageQueue: list[str] = field(default_factory=list)
+    conversationHistory: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

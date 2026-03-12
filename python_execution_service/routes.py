@@ -21,9 +21,11 @@ from python_execution_service.config import (
 from python_execution_service.helpers import (
     _request_from_run,
     _sanitize_upload_filename,
+    append_chat_message,
     get_steps_template,
     now_iso,
     persist_runs_locked,
+    push_user_message,
     require_auth,
 )
 from python_execution_service.models import (
@@ -192,6 +194,33 @@ def register_routes(app) -> None:
             if flag:
                 flag.set()
         return {"status": "canceled"}
+
+    @app.post("/v1/runs/{run_id}/chat")
+    def send_chat_message(
+        run_id: str,
+        body: dict[str, str],
+        x_execution_token: str | None = Header(default=None),
+    ) -> dict[str, str]:
+        """Send a user message to the running agent."""
+        require_auth(x_execution_token)
+        message = (body.get("message") or "").strip()
+        if not message:
+            raise HTTPException(status_code=400, detail="Message is required")
+
+        with RUN_LOCK:
+            run = RUNS.get(run_id)
+            if not run:
+                raise HTTPException(status_code=404, detail="Run not found")
+            if run.status not in ("running", "queued"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Run is not active (status: {run.status})",
+                )
+
+        # Emit user message to chat and push to agent queue
+        append_chat_message(run, role="user", kind="user_input", content=message)
+        push_user_message(run_id, message)
+        return {"status": "queued"}
 
     @app.post("/v1/runs/{run_id}/retry", response_model=StartRunResponse)
     def retry_run(

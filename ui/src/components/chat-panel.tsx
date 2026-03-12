@@ -56,17 +56,14 @@ export function ChatPanel({
   onSendAgentMessage,
 }: ChatPanelProps) {
   const isSessionFinished = runId !== null && ["failed", "canceled"].includes(status);
-  const isAgentPhase = status === "completed";
   const hasActiveRun = runId !== null;
-  const isChatInputEnabled = hasActiveRun && isAgentPhase && !isSessionFinished && !!onSendAgentMessage;
+  const isChatInputEnabled = hasActiveRun && !isSessionFinished && !!onSendAgentMessage;
 
   const chatInputHint = !hasActiveRun
     ? null
     : isSessionFinished
       ? "This session has ended. Retry or start a new session to continue chatting with the agent."
-      : !isAgentPhase
-        ? "Agent chat unlocks automatically after CLI conversion completes."
-        : "Press Enter to send. Use Shift + Enter for a new line.";
+      : "Press Enter to send. Use Shift + Enter for a new line.";
 
   React.useEffect(() => {
     if (uploadedFiles.length > 0) {
@@ -335,6 +332,8 @@ function ChatMessageArea({
 function ChatBubble({ message: m }: { message: ChatMessage }) {
   const isUser = m.role === "user";
   const isError = m.role === "error";
+  const isAgentResponse = m.kind === "agent_response";
+  const isAgentThinkingMsg = m.kind === "agent_thinking" || m.kind === "thinking";
   const isSqlRow = m.kind === "sql_statement" || m.kind === "sql_error";
 
   if (isSqlRow && m.sql) {
@@ -354,13 +353,39 @@ function ChatBubble({ message: m }: { message: ChatMessage }) {
     );
   }
 
-  const textClass = isUser
-    ? "text-blue-300"
-    : isError
-      ? "text-red-300"
-      : "text-white/85";
+  if (isAgentThinkingMsg) {
+    return (
+      <div className="flex items-start gap-2 rounded-xl border border-indigo-400/20 bg-indigo-500/5 px-3 py-2 text-sm leading-relaxed text-indigo-200/80">
+        <span className="mt-0.5 inline-flex shrink-0 gap-0.5">
+          <span className="animate-pulse" style={{ animationDelay: '0ms' }}>◆</span>
+        </span>
+        <span className="whitespace-pre-wrap">{m.content}</span>
+      </div>
+    );
+  }
 
-  const prefix = isUser ? "You" : isError ? "Error" : null;
+  if (isUser) {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[80%] rounded-2xl bg-blue-600/20 border border-blue-400/20 px-4 py-2 text-sm leading-relaxed text-blue-100">
+          <span className="mr-2 text-xs font-semibold uppercase tracking-wider text-blue-300/60">You</span>
+          {m.content}
+        </div>
+      </div>
+    );
+  }
+
+  if (isAgentResponse) {
+    return (
+      <div className="rounded-xl border border-emerald-400/15 bg-emerald-500/5 px-4 py-2.5 text-sm leading-relaxed text-white/90">
+        <span className="mr-2 text-xs font-semibold uppercase tracking-wider text-emerald-400/60">Agent</span>
+        <span className="whitespace-pre-wrap">{m.content}</span>
+      </div>
+    );
+  }
+
+  const textClass = isError ? "text-red-300" : "text-white/85";
+  const prefix = isError ? "Error" : null;
 
   return (
     <div className={`whitespace-pre-wrap text-sm leading-relaxed ${textClass}`}>

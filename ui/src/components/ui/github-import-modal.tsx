@@ -2,19 +2,20 @@
 
 import * as React from "react";
 import * as Dialog from "@radix-ui/react-dialog";
+import { FileTree } from "@/components/ui/file-tree";
 import {
   Github,
   Search,
   X,
   Loader2,
-  FileText,
   CheckSquare,
   Square,
   AlertTriangle,
-  FolderTree,
+  ArrowRight,
   Lock,
   ChevronDown,
   ChevronRight,
+  GitBranch,
 } from "lucide-react";
 import {
   useGitHubImportState,
@@ -32,18 +33,6 @@ import {
   type GitHubFetchedFile,
 } from "@/lib/github-store";
 import type { WizardFile } from "@/lib/wizard-store";
-
-// ── Helpers ────────────────────────────────────────────────────────────────────
-
-function cn(...inputs: (string | boolean | undefined | null)[]): string {
-  return inputs.filter(Boolean).join(" ");
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 // ── Props ──────────────────────────────────────────────────────────────────────
 
@@ -68,7 +57,6 @@ export function GitHubImportModal({
   const [showTokenField, setShowTokenField] = React.useState(false);
   const [showBranchField, setShowBranchField] = React.useState(false);
 
-  // Get the appropriate extension filter based on mode
   const extensionFilter = React.useMemo(
     () => (mode === "source" ? undefined : ["csv", "json"]),
     [mode]
@@ -89,7 +77,6 @@ export function GitHubImportModal({
     visiblePaths.length > 0 &&
     visiblePaths.every((p) => ghState.selectedPaths.has(p));
 
-  // Reset state when modal opens
   React.useEffect(() => {
     if (open) {
       resetGitHubImport();
@@ -106,7 +93,6 @@ export function GitHubImportModal({
     const fetched = await fetchSelectedFiles();
     if (fetched.length === 0) return;
 
-    // Convert GitHub files to WizardFile objects with synthetic File blobs
     const wizardFiles: WizardFile[] = fetched.map(
       (f: GitHubFetchedFile) => ({
         name: f.path.split("/").pop() ?? f.path,
@@ -130,273 +116,235 @@ export function GitHubImportModal({
     }
   };
 
-  const title =
+  const subtitle =
     mode === "source"
-      ? "Import Source Files from GitHub"
-      : "Import Schema Mappings from GitHub";
+      ? "Select source files to import"
+      : "Select schema mapping files";
+
+  const hasTree = ghState.tree.length > 0;
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm animate-in fade-in-0" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[96vw] max-w-[720px] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-[#333] bg-[#0d0d0d] shadow-2xl shadow-black/40 animate-in fade-in-0 zoom-in-95 focus:outline-none">
-          {/* Header */}
-          <div className="flex items-center justify-between border-b border-[#222] px-6 py-4">
-            <Dialog.Title className="flex items-center gap-3 text-lg font-semibold text-white">
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#4da5fc]/10 border border-[#4da5fc]/20">
-                <Github className="h-5 w-5 text-[#4da5fc]" />
-              </div>
-              {title}
-            </Dialog.Title>
-            <Dialog.Close className="rounded-full p-1.5 text-[#666] transition-colors hover:bg-[#222] hover:text-white">
-              <X className="h-5 w-5" />
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/70" />
+        <Dialog.Content className="fixed inset-0 z-50 flex flex-col bg-[#111] focus:outline-none">
+          {/* ── Top bar ──────────────────────────────────────────────── */}
+          <header className="flex items-center justify-between border-b border-neutral-800 px-6 py-4 shrink-0">
+            <div className="flex items-center gap-3">
+              <Github className="h-5 w-5 text-neutral-300" />
+              <Dialog.Title className="text-sm font-medium text-neutral-100">
+                Import from GitHub
+              </Dialog.Title>
+              <span className="text-xs text-neutral-400">{subtitle}</span>
+            </div>
+            <Dialog.Close className="rounded p-1.5 text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-100">
+              <X className="h-4 w-4" />
             </Dialog.Close>
-          </div>
+          </header>
 
-          <div className="px-6 py-5 space-y-5 max-h-[70vh] overflow-y-auto scrollbar-dark">
-            {/* Repository URL Input */}
-            <div className="space-y-3">
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium text-[#8a8a8f]">
-                  Repository URL
-                </label>
-                <div className="flex gap-2">
+          {/* ── Body ─────────────────────────────────────────────────── */}
+          <div className="flex flex-1 overflow-hidden">
+            {/* Left sidebar — repo config */}
+            <aside className="flex w-80 shrink-0 flex-col border-r border-neutral-800 bg-[#0e0e0e]">
+              <div className="flex-1 overflow-y-auto p-5 space-y-5 scrollbar-dark">
+                {/* Repo URL */}
+                <div className="space-y-2">
+                  <label className="block text-xs font-medium text-neutral-400 uppercase tracking-wider">
+                    Repository
+                  </label>
                   <input
                     type="text"
                     value={ghState.repoUrl}
                     onChange={(e) => setRepoUrl(e.target.value)}
-                    placeholder="https://github.com/owner/repo  or  owner/repo"
-                    className="flex-1 rounded-lg border border-[#333] bg-[#1a1a1a] px-3 py-2.5 text-sm text-white placeholder-[#555] outline-none transition-colors focus:border-[#4da5fc] focus:ring-1 focus:ring-[#4da5fc]/30"
+                    placeholder="owner/repo"
+                    className="w-full rounded border border-neutral-700 bg-transparent px-3 py-2 text-sm text-neutral-100 placeholder-neutral-500 outline-none transition-colors focus:border-neutral-500"
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && ghState.owner && ghState.repo) {
                         void handleLoadRepo();
                       }
                     }}
                   />
+                </div>
+
+                {/* Optional toggles */}
+                <div className="space-y-1">
                   <button
                     type="button"
-                    onClick={() => void handleLoadRepo()}
-                    disabled={
-                      !ghState.owner ||
-                      !ghState.repo ||
-                      ghState.isLoadingTree
-                    }
-                    className={cn(
-                      "flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-all whitespace-nowrap",
-                      ghState.owner && ghState.repo && !ghState.isLoadingTree
-                        ? "bg-[#4da5fc] text-white hover:bg-[#3d8fd6]"
-                        : "bg-[#333] text-[#666] cursor-not-allowed"
-                    )}
+                    onClick={() => setShowTokenField(!showTokenField)}
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-100"
                   >
-                    {ghState.isLoadingTree ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <FolderTree className="h-4 w-4" />
-                    )}
-                    {ghState.isLoadingTree ? "Loading…" : "Load Repo"}
-                  </button>
-                </div>
-              </div>
-
-              {/* Optional fields toggle */}
-              <div className="flex gap-3">
-                <button
-                  type="button"
-                  onClick={() => setShowTokenField(!showTokenField)}
-                  className="flex items-center gap-1.5 text-xs text-[#666] hover:text-[#8a8a8f] transition-colors"
-                >
-                  <Lock className="h-3 w-3" />
-                  {showTokenField ? "Hide" : "Private repo?"}
-                  {showTokenField ? (
-                    <ChevronDown className="h-3 w-3" />
-                  ) : (
-                    <ChevronRight className="h-3 w-3" />
-                  )}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowBranchField(!showBranchField)}
-                  className="flex items-center gap-1.5 text-xs text-[#666] hover:text-[#8a8a8f] transition-colors"
-                >
-                  Custom branch
-                  {showBranchField ? (
-                    <ChevronDown className="h-3 w-3" />
-                  ) : (
-                    <ChevronRight className="h-3 w-3" />
-                  )}
-                </button>
-              </div>
-
-              {/* Token field */}
-              {showTokenField && (
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-[#8a8a8f] flex items-center gap-1">
                     <Lock className="h-3 w-3" />
-                    Personal Access Token
-                    <span className="text-[#555]">(optional)</span>
-                  </label>
-                  <input
-                    type="password"
-                    value={ghState.token}
-                    onChange={(e) => setToken(e.target.value)}
-                    placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
-                    className="w-full rounded-lg border border-[#333] bg-[#1a1a1a] px-3 py-2.5 text-sm text-white placeholder-[#555] outline-none transition-colors focus:border-[#4da5fc] focus:ring-1 focus:ring-[#4da5fc]/30"
-                  />
-                  <p className="text-[10px] text-[#555]">
-                    Required for private repositories. Token is only used for this request and never stored.
-                  </p>
+                    <span className="flex-1 text-left">Private repository</span>
+                    {showTokenField ? (
+                      <ChevronDown className="h-3 w-3" />
+                    ) : (
+                      <ChevronRight className="h-3 w-3" />
+                    )}
+                  </button>
+
+                  {showTokenField && (
+                    <div className="pl-7 pr-2 pb-2 space-y-1.5">
+                      <input
+                        type="password"
+                        value={ghState.token}
+                        onChange={(e) => setToken(e.target.value)}
+                        placeholder="ghp_…"
+                        className="w-full rounded border border-neutral-700 bg-transparent px-3 py-2 text-sm text-neutral-100 placeholder-neutral-500 outline-none transition-colors focus:border-neutral-500"
+                      />
+                      <p className="text-[10px] text-neutral-500 leading-tight">
+                        Token is used once and never stored.
+                      </p>
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => setShowBranchField(!showBranchField)}
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-100"
+                  >
+                    <GitBranch className="h-3 w-3" />
+                    <span className="flex-1 text-left">Custom branch</span>
+                    {showBranchField ? (
+                      <ChevronDown className="h-3 w-3" />
+                    ) : (
+                      <ChevronRight className="h-3 w-3" />
+                    )}
+                  </button>
+
+                  {showBranchField && (
+                    <div className="pl-7 pr-2 pb-2">
+                      <input
+                        type="text"
+                        value={ghState.branch}
+                        onChange={(e) => setBranch(e.target.value)}
+                        placeholder="main"
+                        className="w-full rounded border border-neutral-700 bg-transparent px-3 py-2 text-sm text-neutral-100 placeholder-neutral-500 outline-none transition-colors focus:border-neutral-500"
+                      />
+                    </div>
+                  )}
                 </div>
-              )}
 
-              {/* Branch field */}
-              {showBranchField && (
-                <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-[#8a8a8f]">
-                    Branch
-                    <span className="text-[#555] ml-1">(defaults to repo default)</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={ghState.branch}
-                    onChange={(e) => setBranch(e.target.value)}
-                    placeholder="main"
-                    className="w-full rounded-lg border border-[#333] bg-[#1a1a1a] px-3 py-2.5 text-sm text-white placeholder-[#555] outline-none transition-colors focus:border-[#4da5fc] focus:ring-1 focus:ring-[#4da5fc]/30"
-                  />
-                </div>
-              )}
-            </div>
+                {/* Load button */}
+                <button
+                  type="button"
+                  onClick={() => void handleLoadRepo()}
+                  disabled={
+                    !ghState.owner || !ghState.repo || ghState.isLoadingTree
+                  }
+                  className="flex w-full items-center justify-center gap-2 rounded border border-neutral-700 bg-neutral-800 px-4 py-2.5 text-sm font-medium text-neutral-100 transition-colors hover:bg-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {ghState.isLoadingTree ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <ArrowRight className="h-4 w-4" />
+                  )}
+                  {ghState.isLoadingTree ? "Loading…" : "Load repository"}
+                </button>
 
-            {/* Error */}
-            {ghState.error && (
-              <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
-                <p className="text-sm text-red-300">{ghState.error}</p>
-              </div>
-            )}
-
-            {/* File tree */}
-            {ghState.tree.length > 0 && (
-              <div className="space-y-3">
-                {/* Truncation warning */}
-                {ghState.truncated && (
-                  <div className="flex items-start gap-2 rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-2">
-                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
-                    <p className="text-xs text-amber-200">
-                      This repository is very large. The file list may be incomplete (truncated by GitHub).
-                    </p>
+                {/* Error */}
+                {ghState.error && (
+                  <div className="flex items-start gap-2 rounded border border-red-900/50 bg-red-950/30 px-3 py-2.5">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" />
+                    <p className="text-xs text-red-300 leading-relaxed">{ghState.error}</p>
                   </div>
                 )}
 
-                {/* Search + select all row */}
-                <div className="flex items-center gap-2">
-                  <div className="relative flex-1">
-                    <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#555]" />
-                    <input
-                      type="text"
-                      value={ghState.searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="Filter files…"
-                      className="w-full rounded-lg border border-[#333] bg-[#1a1a1a] pl-9 pr-3 py-2 text-sm text-white placeholder-[#555] outline-none transition-colors focus:border-[#4da5fc] focus:ring-1 focus:ring-[#4da5fc]/30"
+                {/* Truncation warning */}
+                {ghState.truncated && (
+                  <div className="flex items-start gap-2 rounded border border-amber-900/50 bg-amber-950/30 px-3 py-2.5">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
+                    <p className="text-xs text-amber-300/80 leading-relaxed">
+                      Large repository — file list may be incomplete.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </aside>
+
+            {/* Right panel — file tree */}
+            <main className="flex flex-1 flex-col overflow-hidden">
+              {hasTree ? (
+                <>
+                  {/* Toolbar */}
+                  <div className="flex items-center gap-3 border-b border-neutral-800 px-5 py-3 shrink-0">
+                    <div className="relative flex-1">
+                      <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-neutral-600" />
+                      <input
+                        type="text"
+                        value={ghState.searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder="Filter files…"
+                        className="w-full rounded border border-neutral-700 bg-transparent pl-8 pr-3 py-1.5 text-sm text-neutral-100 placeholder-neutral-500 outline-none transition-colors focus:border-neutral-500"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleToggleAll}
+                      className="flex items-center gap-1.5 whitespace-nowrap rounded border border-neutral-700 px-2.5 py-1.5 text-xs text-neutral-300 transition-colors hover:bg-neutral-800 hover:text-neutral-100"
+                    >
+                      {allVisibleSelected ? (
+                        <CheckSquare className="h-3.5 w-3.5" />
+                      ) : (
+                        <Square className="h-3.5 w-3.5" />
+                      )}
+                      {allVisibleSelected ? "Deselect all" : "Select all"}
+                    </button>
+                  </div>
+
+                  {/* Stats */}
+                  <div className="flex items-center justify-between border-b border-neutral-800/50 px-5 py-1.5 text-[11px] text-neutral-400 shrink-0">
+                    <span>
+                      {filteredTree.length} file{filteredTree.length !== 1 ? "s" : ""}
+                      {ghState.searchQuery && ` of ${ghState.tree.length}`}
+                    </span>
+                    <span className="text-neutral-300">
+                      {ghState.selectedPaths.size} selected
+                    </span>
+                  </div>
+
+                  {/* Tree */}
+                  <div className="flex-1 overflow-y-auto scrollbar-dark">
+                    <FileTree
+                      entries={filteredTree}
+                      selectedPaths={ghState.selectedPaths}
+                      onToggle={toggleFile}
+                      searchQuery={ghState.searchQuery}
+                      className="border-0 rounded-none max-h-none"
                     />
                   </div>
-                  <button
-                    type="button"
-                    onClick={handleToggleAll}
-                    className="flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#333] bg-[#1a1a1a] px-3 py-2 text-xs text-[#8a8a8f] transition-colors hover:border-[#444] hover:text-white"
-                  >
-                    {allVisibleSelected ? (
-                      <CheckSquare className="h-3.5 w-3.5 text-[#4da5fc]" />
-                    ) : (
-                      <Square className="h-3.5 w-3.5" />
-                    )}
-                    {allVisibleSelected ? "Deselect all" : "Select all"}
-                  </button>
+                </>
+              ) : (
+                <div className="flex flex-1 items-center justify-center">
+                  <div className="text-center space-y-2">
+                    <Github className="mx-auto h-8 w-8 text-neutral-600" />
+                    <p className="text-sm text-neutral-400">
+                      Enter a repository URL and load it to browse files
+                    </p>
+                  </div>
                 </div>
-
-                {/* Stats bar */}
-                <div className="flex items-center justify-between text-xs text-[#666]">
-                  <span>
-                    {filteredTree.length} file{filteredTree.length !== 1 ? "s" : ""} shown
-                    {ghState.searchQuery && ` (filtered from ${ghState.tree.length})`}
-                  </span>
-                  <span className="text-[#4da5fc]">
-                    {ghState.selectedPaths.size} selected
-                  </span>
-                </div>
-
-                {/* File list */}
-                <div className="max-h-64 overflow-y-auto rounded-lg border border-[#222] bg-[#111] scrollbar-dark">
-                  {filteredTree.length === 0 ? (
-                    <div className="flex items-center justify-center py-8">
-                      <p className="text-sm text-[#555]">
-                        No files match your filter.
-                      </p>
-                    </div>
-                  ) : (
-                    filteredTree.map((entry) => {
-                      const isSelected = ghState.selectedPaths.has(entry.path);
-                      return (
-                        <button
-                          type="button"
-                          key={entry.sha}
-                          onClick={() => toggleFile(entry.path)}
-                          className={cn(
-                            "flex w-full items-center gap-3 border-b border-[#1a1a1a] px-3 py-2 text-left transition-colors last:border-b-0",
-                            isSelected
-                              ? "bg-[#4da5fc]/5 hover:bg-[#4da5fc]/10"
-                              : "hover:bg-[#1a1a1a]"
-                          )}
-                        >
-                          {isSelected ? (
-                            <CheckSquare className="h-4 w-4 shrink-0 text-[#4da5fc]" />
-                          ) : (
-                            <Square className="h-4 w-4 shrink-0 text-[#444]" />
-                          )}
-                          <FileText className="h-3.5 w-3.5 shrink-0 text-[#666]" />
-                          <span
-                            className={cn(
-                              "flex-1 truncate text-sm",
-                              isSelected ? "text-white" : "text-[#999]"
-                            )}
-                          >
-                            {entry.path}
-                          </span>
-                          <span className="shrink-0 text-[10px] text-[#555]">
-                            {formatFileSize(entry.size)}
-                          </span>
-                        </button>
-                      );
-                    })
-                  )}
-                </div>
-              </div>
-            )}
+              )}
+            </main>
           </div>
 
-          {/* Footer */}
-          <div className="flex items-center justify-between border-t border-[#222] px-6 py-4">
+          {/* ── Bottom bar ───────────────────────────────────────────── */}
+          <footer className="flex items-center justify-between border-t border-neutral-800 px-6 py-3 shrink-0">
             <Dialog.Close asChild>
               <button
                 type="button"
-                className="rounded-lg px-4 py-2 text-sm text-[#8a8a8f] transition-colors hover:bg-[#1a1a1a] hover:text-white"
+                className="rounded px-4 py-2 text-sm text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-100"
               >
                 Cancel
               </button>
             </Dialog.Close>
 
-            {ghState.tree.length > 0 && (
+            {hasTree && (
               <button
                 type="button"
                 onClick={() => void handleImport()}
                 disabled={
                   ghState.selectedPaths.size === 0 || ghState.isLoadingFiles
                 }
-                className={cn(
-                  "flex items-center gap-2 rounded-lg px-5 py-2 text-sm font-medium transition-all",
-                  ghState.selectedPaths.size > 0 && !ghState.isLoadingFiles
-                    ? "bg-[#4da5fc] text-white hover:bg-[#3d8fd6]"
-                    : "bg-[#333] text-[#666] cursor-not-allowed"
-                )}
+                className="flex items-center gap-2 rounded bg-neutral-200 px-5 py-2 text-sm font-medium text-neutral-900 transition-colors hover:bg-white disabled:opacity-30 disabled:cursor-not-allowed"
               >
                 {ghState.isLoadingFiles ? (
                   <>
@@ -411,7 +359,7 @@ export function GitHubImportModal({
                 )}
               </button>
             )}
-          </div>
+          </footer>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

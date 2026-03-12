@@ -1,4 +1,4 @@
-"""LangGraph workflow construction and synchronous run execution."""
+"""LangGraph agent-driven workflow execution."""
 
 import json
 import logging
@@ -7,19 +7,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from langgraph.graph import END, START, StateGraph
-
+from agentic_core.agent.graph import build_agent_graph, cleanup_agent_session
+from agentic_core.agent.tools import get_active_context, set_active_context
 from agentic_core.models.context import MigrationContext, MigrationState
-from agentic_core.nodes.add_source_code import add_source_code_node
-from agentic_core.nodes.convert_code import convert_code_node
-from agentic_core.nodes.execute_sql import execute_sql_node
-from agentic_core.nodes.finalize import finalize_node
-from agentic_core.nodes.human_review import human_review_node
-from agentic_core.nodes.init_project import init_project_node
-from agentic_core.nodes.schema_mapping import apply_schema_mapping_node
-from agentic_core.nodes.self_heal import self_heal_node
-from agentic_core.nodes.validate import validate_node
-from agentic_core.routing.decisions import should_continue, should_continue_after_execute
 from python_execution_service.config import (
     PROJECT_LOCKS,
     RUN_LOCK,
@@ -35,11 +25,12 @@ from python_execution_service.helpers import (
     flush_persist_if_dirty,
     format_activity_log_entry,
     persist_runs_locked,
+    pop_user_message,
     send_terminal_data,
     set_run_status,
     update_step,
 )
-from python_execution_service.models import RunRecord, WorkflowState
+from python_execution_service.models import RunRecord
 
 logger = logging.getLogger(__name__)
 
@@ -55,52 +46,13 @@ def _perf_log(run: RunRecord, message: str) -> None:
         pass
 
 
-def run_node(
-    run: RunRecord,
-    run_id: str,
-    state: MigrationContext,
-    step_id: str,
-    node_fn,
-) -> MigrationContext:
-    ensure_not_canceled(run_id)
-    update_step(run, step_id, "running")
-    append_event(
-        run,
-        "step:started",
-        {"runId": run_id, "stepId": step_id, "label": STEP_LABELS[step_id]},
-    )
-    append_chat_message(
-        run,
-        role="system",
-        kind="step_started",
-        content=f"Starting: {STEP_LABELS[step_id]}",
-        step={"id": step_id, "label": STEP_LABELS[step_id]},
-    )
-    t0 = time.monotonic()
-    _perf_log(run, f"STEP_START  {step_id}")
-    state = node_fn(state)
-    elapsed = time.monotonic() - t0
-    _perf_log(run, f"STEP_END    {step_id}  elapsed={elapsed:.3f}s  status={'ERROR' if state.current_stage == MigrationState.ERROR else 'OK'}")
-    if state.current_stage == MigrationState.ERROR:
-        update_step(run, step_id, "failed")
-        raise RuntimeError(state.errors[-1] if state.errors else f"Step failed: {step_id}")
-    update_step(run, step_id, "completed")
-    append_event(
-        run,
-        "step:completed",
-        {"runId": run_id, "stepId": step_id, "label": STEP_LABELS[step_id]},
-    )
-    append_chat_message(
-        run,
-        role="system",
-        kind="step_completed",
-        content=f"Completed: {STEP_LABELS[step_id]}",
-        step={"id": step_id, "label": STEP_LABELS[step_id]},
-    )
-    return state
-
-
 def execute_run_sync(run_id: str) -> None:  # noqa: C901
+    """Execute a migration run using the autonomous agent.
+
+    This replaces the old rigid pipeline with an LLM-driven agent that
+    decides which migration tool to call next, handles errors
+    autonomously, and can respond to user messages during execution.
+    """
     run_t0 = time.monotonic()
     with RUN_LOCK:
         run = RUNS[run_id]
@@ -109,6 +61,9 @@ def execute_run_sync(run_id: str) -> None:  # noqa: C901
         resume_missing_objects = list(run.missingObjects)
         resume_last_executed_file_index = int(run.lastExecutedFileIndex)
     _perf_log(run, f"RUN_START   run_id={run_id}")
+
+    agent_graph = None
+
     try:
         set_run_status(run, "running")
         append_event(run, "run:started", {"runId": run_id})
@@ -116,8 +71,10 @@ def execute_run_sync(run_id: str) -> None:  # noqa: C901
             run,
             role="system",
             kind="run_status",
-            content="Migration started.",
+            content="Migration started. The agent is analyzing the task...",
         )
+
+        # ── Sink callbacks (identical to the old workflow) ──────
 
         def activity_log_sink(entry: dict[str, Any]) -> None:
             formatted = format_activity_log_entry(entry)
@@ -190,49 +147,7 @@ def execute_run_sync(run_id: str) -> None:  # noqa: C901
             with _streamed_stmt_lock:
                 _streamed_stmt_count += 1
 
-        def emit_execute_events(updated: MigrationContext) -> None:
-            """Post-hook: emit error events and any statements missed by real-time sink."""
-            execution_log = updated.execution_log or []
-            with RUN_LOCK:
-                start_index = max(0, int(run.executionEventCursor))
-            new_entries = execution_log[start_index:]
-
-            for file_entry in new_entries:
-                if file_entry.get("status") == "failed":
-                    append_event(
-                        run,
-                        "execute_sql:error",
-                        {
-                            "runId": run_id,
-                            "file": file_entry.get("file"),
-                            "fileIndex": file_entry.get("index"),
-                            "errorType": file_entry.get("error_type"),
-                            "errorMessage": file_entry.get("error_message"),
-                            "failedStatement": file_entry.get("failed_statement"),
-                            "failedStatementIndex": file_entry.get("failed_statement_index"),
-                        },
-                    )
-                    failed_statement_index = file_entry.get("failed_statement_index")
-                    label = (
-                        f"Stmt {int(failed_statement_index) + 1} ERROR"
-                        if isinstance(failed_statement_index, int)
-                        else "Stmt ? ERROR"
-                    )
-                    append_chat_message(
-                        run,
-                        role="error",
-                        kind="sql_error",
-                        content=label,
-                        step={"id": "execute_sql", "label": STEP_LABELS["execute_sql"]},
-                        sql={
-                            "error": str(file_entry.get("error_message") or ""),
-                            "failedStatement": str(file_entry.get("failed_statement") or ""),
-                            "output": f"Error type: {str(file_entry.get('error_type') or 'execution_error')}",
-                        },
-                    )
-            with RUN_LOCK:
-                run.executionEventCursor = len(execution_log)
-                persist_runs_locked(force=True)
+        # ── Build migration context ───────────────────────────
 
         context = MigrationContext(
             project_name=run.projectName,
@@ -265,113 +180,69 @@ def execute_run_sync(run_id: str) -> None:  # noqa: C901
                 f"Applying uploaded DDL ({Path(resume_ddl_path).name}) before resuming execute_sql.",
             )
 
-        def sync_validation_state(updated: MigrationContext) -> None:
-            with RUN_LOCK:
-                run.validationIssues = updated.validation_issues or []
-                persist_runs_locked()
-            for issue in updated.validation_issues:
-                append_event(run, "validation:issue", issue if isinstance(issue, dict) else {"message": str(issue)})
+        # ── Agent callbacks ────────────────────────────────────
 
-        def sync_self_heal_state(updated: MigrationContext) -> None:
-            with RUN_LOCK:
-                run.selfHealIteration = int(updated.self_heal_iteration)
-                persist_runs_locked()
-            append_event(
-                run,
-                "selfheal:iteration",
-                {"iteration": updated.self_heal_iteration, "runId": run_id},
-            )
-            add_log(run, f"Self-heal iteration {updated.self_heal_iteration} applied; re-running execute_sql.")
+        def message_callback(role: str, kind: str, content: str) -> None:
+            """Stream agent messages to the frontend in real time."""
+            append_chat_message(run, role=role, kind=kind, content=content)
 
-        def wrap_node(step_id: str, node_fn, *, success_log: str | None = None, post_hook=None):
-            def _wrapped(state_obj: WorkflowState) -> WorkflowState:
-                updated = run_node(run, run_id, state_obj["context"], step_id, node_fn)
-                if success_log:
-                    add_log(run, success_log)
-                if callable(post_hook):
-                    post_hook(updated)
-                return {"context": updated}
-            return _wrapped
-
-        def route_after_execute(state_obj: WorkflowState) -> str:
-            current = state_obj["context"]
-            decision = should_continue_after_execute(current)
-            if decision == "self_heal" and current.self_heal_iteration >= current.max_self_heal_iterations:
-                current.requires_human_intervention = True
-                current.human_intervention_reason = (
-                    f"Could not resolve execution errors after {current.max_self_heal_iterations} self-heal iteration(s)."
+        def step_callback(step_id: str, status: str) -> None:
+            """Update step progress in the UI."""
+            ensure_not_canceled(run_id)
+            update_step(run, step_id, status)
+            if status == "running":
+                append_event(
+                    run,
+                    "step:started",
+                    {"runId": run_id, "stepId": step_id, "label": STEP_LABELS.get(step_id, step_id)},
                 )
-                return "human_review"
-            if decision == "finalize":
-                return "validate"
-            return decision
+            elif status in ("completed", "failed"):
+                append_event(
+                    run,
+                    "step:completed" if status == "completed" else "step:failed",
+                    {"runId": run_id, "stepId": step_id, "label": STEP_LABELS.get(step_id, step_id)},
+                )
+                # After execute_sql, sync execution state
+                try:
+                    updated_ctx = get_active_context(run_id)
+                    sync_execution_state(updated_ctx)
+                except Exception:
+                    pass
 
-        def route_after_validate(state_obj: WorkflowState) -> str:
-            current = state_obj["context"]
-            decision = should_continue(current)
-            if decision == "finalize":
-                return "finalize"
-            if not current.human_intervention_reason:
-                current.human_intervention_reason = "Validation failed after execution"
-            return "human_review"
+        def user_message_getter() -> str | None:
+            """Check for pending user messages."""
+            ensure_not_canceled(run_id)
+            return pop_user_message(run_id)
 
-        graph_builder = StateGraph(WorkflowState)
-        graph_builder.add_node("init_project", wrap_node("init_project", init_project_node, success_log="Project initialized."))
-        graph_builder.add_node("add_source_code", wrap_node("add_source_code", add_source_code_node, success_log="Source code added."))
-        graph_builder.add_node(
-            "apply_schema_mapping",
-            wrap_node("apply_schema_mapping", apply_schema_mapping_node, success_log="Schema mapping applied."),
-        )
-        graph_builder.add_node("convert_code", wrap_node("convert_code", convert_code_node, success_log="Code conversion complete."))
-        graph_builder.add_node(
-            "execute_sql",
-            wrap_node(
-                "execute_sql",
-                execute_sql_node,
-                success_log="Execute SQL stage completed.",
-                post_hook=lambda updated: (sync_execution_state(updated), emit_execute_events(updated)),
-            ),
-        )
-        graph_builder.add_node(
-            "self_heal",
-            wrap_node("self_heal", self_heal_node, post_hook=sync_self_heal_state),
-        )
-        graph_builder.add_node(
-            "validate",
-            wrap_node("validate", validate_node, post_hook=sync_validation_state),
-        )
-        graph_builder.add_node("human_review", wrap_node("human_review", human_review_node))
-        graph_builder.add_node("finalize", wrap_node("finalize", finalize_node))
+        # ── Build and run the agent graph ──────────────────────
 
-        graph_builder.add_edge(START, "init_project")
-        graph_builder.add_edge("init_project", "add_source_code")
-        graph_builder.add_edge("add_source_code", "apply_schema_mapping")
-        graph_builder.add_edge("apply_schema_mapping", "convert_code")
-        graph_builder.add_edge("convert_code", "execute_sql")
-        graph_builder.add_conditional_edges(
-            "execute_sql",
-            route_after_execute,
-            {
-                "validate": "validate",
-                "self_heal": "self_heal",
-                "human_review": "human_review",
-            },
+        _perf_log(run, "AGENT_BUILD_START")
+        agent_graph = build_agent_graph(
+            context,
+            message_callback=message_callback,
+            step_callback=step_callback,
+            user_message_getter=user_message_getter,
         )
-        graph_builder.add_edge("self_heal", "execute_sql")
-        graph_builder.add_conditional_edges(
-            "validate",
-            route_after_validate,
-            {
-                "finalize": "finalize",
-                "human_review": "human_review",
-            },
-        )
-        graph_builder.add_edge("human_review", END)
-        graph_builder.add_edge("finalize", END)
+        _perf_log(run, "AGENT_BUILD_END")
 
-        workflow = graph_builder.compile()
-        final_state = workflow.invoke({"context": context})
-        final_context = final_state["context"]
+        _perf_log(run, "AGENT_RUN_START")
+        initial_state = {
+            "context": context,
+            "messages": [],
+            "iteration_count": 0,
+            "is_complete": False,
+            "should_stop": False,
+        }
+
+        final_state = agent_graph.invoke(initial_state)
+        _perf_log(run, "AGENT_RUN_END")
+
+        # ── Process final state ────────────────────────────────
+
+        final_context = get_active_context(run_id)
+
+        # Sync final execution state
+        sync_execution_state(final_context)
 
         if final_context.current_stage == MigrationState.COMPLETED:
             set_run_status(run, "completed")
@@ -380,15 +251,26 @@ def execute_run_sync(run_id: str) -> None:  # noqa: C901
                 run,
                 role="system",
                 kind="run_status",
-                content="Migration completed.",
+                content="Migration completed successfully!",
             )
+            return
+
+        if final_context.requires_ddl_upload:
+            reason = final_context.human_intervention_reason or "DDL upload required"
+            set_run_status(run, "failed", reason)
+            append_event(run, "run:failed", {"runId": run_id, "reason": reason})
+            with RUN_LOCK:
+                run.requiresDdlUpload = True
+                run.missingObjects = final_context.missing_objects or []
+                run.resumeFromStage = final_context.resume_from_stage or "execute_sql"
+                run.lastExecutedFileIndex = int(final_context.last_executed_file_index)
+                persist_runs_locked(force=True)
             return
 
         reason = final_context.human_intervention_reason or "Migration stopped before completion"
         set_run_status(run, "failed", reason)
         append_event(run, "run:failed", {"runId": run_id, "reason": reason})
-        if final_context.current_stage == MigrationState.HUMAN_REVIEW:
-            add_log(run, reason, step_id="human_review")
+
     except Exception as exc:
         message = str(exc)
         canceled = message == "Run canceled"
@@ -402,6 +284,10 @@ def execute_run_sync(run_id: str) -> None:  # noqa: C901
             content=message or "Run failed",
         )
     finally:
+        # Clean up agent session
+        if agent_graph is not None:
+            cleanup_agent_session(agent_graph)
+
         total_elapsed = time.monotonic() - run_t0
         _perf_log(run, f"RUN_END     run_id={run_id}  total_elapsed={total_elapsed:.3f}s  status={run.status}")
         flush_persist_if_dirty()

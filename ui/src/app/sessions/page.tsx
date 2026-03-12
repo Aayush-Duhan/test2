@@ -769,6 +769,17 @@ export default function SessionsPage() {
             onCreateProject={handleConfirm}
             onRetryRun={retryRun}
             onPickDdlFile={() => ddlFileInputRef.current?.click()}
+            onSendAgentMessage={runId ? async (message: string) => {
+              try {
+                await fetch(`/api/runs/${runId}/chat`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ message }),
+                });
+              } catch {
+                // message delivery is best-effort; SSE stream will show agent response
+              }
+            } : undefined}
           />
         </div>
       </SidebarProvider>
