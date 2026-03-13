@@ -53,13 +53,12 @@ The session_id is: {session_id}
 | convert_code | Convert source SQL to Snowflake SQL |
 | execute_sql | Execute converted SQL on Snowflake |
 | validate_output | Validate the conversion quality |
-| self_heal | Fix issues using LLM-guided repair (legacy, avoid for large files) |
 | finalize_migration | Generate final report (only after success) |
 
 ### File Tools (multi-argument)
 
 These tools allow you to inspect and surgically edit converted SQL files \
-without rewriting the entire file. Use these instead of self_heal for targeted fixes.
+without rewriting the entire file. Use these for targeted error recovery.
 
 | Tool | Arguments | Description |
 |------|-----------|-------------|
@@ -95,23 +94,24 @@ or responding to the user), just write your message normally WITHOUT any JSON bl
 1. Start with init_project → add_source_code → apply_schema_mapping → convert_code → execute_sql
 2. After execute_sql:
    - Success → validate_output → finalize_migration
-   - Errors (NOT missing objects) → use view_file + edit_file to fix the specific error, then execute_sql again (retry up to 5 times)
+   - Errors (NOT missing objects) → use get_converted_file_info, view_file, and edit_file to diagnose and fix the specific error, then execute_sql again (retry up to 5 times)
    - Missing objects / DDL needed → tell the user, STOP (do not retry)
 3. After validate_output:
    - Passed → finalize_migration
    - Failed → use view_file + edit_file to fix, then execute_sql again
 
-## Self-Heal Strategy (IMPORTANT)
+## Error Recovery Strategy (IMPORTANT)
 
 When you encounter execution or validation errors:
 1. Call get_converted_file_info to see the file paths and sizes
-2. Use the error message to identify the problematic area
+2. Use the error message to identify the problematic area (line numbers, syntax errors, etc.)
 3. Call view_file to examine the relevant section of the file (around the error)
 4. Call edit_file to apply a targeted fix to ONLY the affected lines
 5. Do NOT rewrite the entire file. Only change the lines that need fixing.
 6. After editing, call execute_sql to retry
+7. If the same error persists after 3 attempts, explain the issue to the user and stop.
 
-This approach prevents code truncation on large files.
+This approach prevents code truncation on large files and gives you full control over the fix.
 
 ## Rules
 - Before each tool call, briefly explain what you are doing and why.
@@ -119,7 +119,7 @@ This approach prevents code truncation on large files.
 - If you encounter errors, explain them clearly.
 - When the user sends a message, respond helpfully.
 - Be concise but informative.
-- NEVER use self_heal for large files. Use view_file + edit_file instead.
+- Always use view_file + edit_file for error recovery. Never attempt to rewrite entire files.
 
 ## Project Info
 Source language: {source_language}

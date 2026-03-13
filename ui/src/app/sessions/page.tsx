@@ -116,7 +116,7 @@ function buildHydratedTerminalCommands(
 }
 
 /** Step IDs where the agent performs LLM-heavy work (thinking indicator). */
-const THINKING_STEPS = ["self_heal", "convert_code", "validate"];
+const THINKING_STEPS = ["convert_code", "validate"];
 
 function buildHydratedMessagesFallback(
   events: unknown,
@@ -176,15 +176,7 @@ function buildHydratedMessagesFallback(
         continue;
       }
 
-      if (type === "selfheal:iteration") {
-        usedEventTimeline = true;
-        timeline.push(
-          makeThinkingMessage(
-            `Self-heal iteration ${String(payload.iteration ?? "?")}\nAnalyzing execution errors and generating fixes via Snowflake Cortex...`
-          )
-        );
-        continue;
-      }
+
 
       if (type === "execute_sql:statement") {
         usedEventTimeline = true;
@@ -690,18 +682,7 @@ export default function SessionsPage() {
 
 
 
-    source.addEventListener("selfheal:iteration", (event) => {
-      const payload = JSON.parse((event as MessageEvent).data);
-      setIsAgentThinking(true);
-      if (!chatSchemaReadyRef.current) {
-        setMessages((prev) => [
-          ...prev,
-          makeThinkingMessage(
-            `Self-heal iteration ${payload?.iteration ?? "?"}\nAnalyzing execution errors and generating fixes via Snowflake Cortex...`
-          ),
-        ]);
-      }
-    });
+
 
     source.addEventListener("execute_sql:statement", (event) => {
       const payload = JSON.parse((event as MessageEvent).data) as ExecuteStatementEvent;

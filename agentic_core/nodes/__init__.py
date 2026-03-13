@@ -7,7 +7,6 @@ from .finalize import finalize_node
 from .human_review import human_review_node
 from .init_project import init_project_node
 from .schema_mapping import apply_schema_mapping_node
-from .self_heal import self_heal_node
 from .validate import validate_node
 
 __all__ = [
@@ -16,8 +15,8 @@ __all__ = [
     "apply_schema_mapping_node",
     "convert_code_node",
     "execute_sql_node",
-    "self_heal_node",
     "validate_node",
     "human_review_node",
     "finalize_node",
 ]
+

@@ -29,7 +29,6 @@ export type SessionSummary = {
   updatedAt: string;
   error?: string | null;
   requiresDdlUpload?: boolean;
-  selfHealIteration?: number;
   executionErrors?: ExecuteErrorEvent[];
 };
 
@@ -75,7 +74,6 @@ export const STEP_BLUEPRINT: StepState[] = [
   { id: "apply_schema_mapping", label: "Apply schema mapping", status: "pending" },
   { id: "convert_code", label: "Convert SQL", status: "pending" },
   { id: "execute_sql", label: "Execute SQL", status: "pending" },
-  { id: "self_heal", label: "Self-heal fixes", status: "pending" },
   { id: "validate", label: "Validate output", status: "pending" },
   { id: "human_review", label: "Human review", status: "pending" },
   { id: "finalize", label: "Finalize output", status: "pending" },

@@ -18,7 +18,7 @@ from agentic_core.nodes.schema_mapping import apply_schema_mapping_node
 from agentic_core.nodes.convert_code import convert_code_node
 from agentic_core.nodes.execute_sql import execute_sql_node
 from agentic_core.nodes.validate import validate_node
-from agentic_core.nodes.self_heal import self_heal_node
+
 from agentic_core.nodes.finalize import finalize_node
 from agentic_core.services.file_tools import (
     view_file_section,
@@ -229,18 +229,7 @@ def validate_output(session_id: str) -> str:
     return json.dumps(result, default=str)
 
 
-@tool
-def self_heal(session_id: str) -> str:
-    """Apply self-healing to fix issues in converted SQL using Snowflake Cortex LLM. Use after execute_sql or validate reports errors."""
-    ctx = get_active_context(session_id)
-    cb = get_step_callback(session_id)
-    if cb:
-        cb("self_heal", "running")
-    updated, result = _run_node_safely("self_heal", self_heal_node, ctx, f"Self-healing iteration {ctx.self_heal_iteration + 1} complete.")
-    set_active_context(session_id, updated)
-    if cb:
-        cb("self_heal", "completed" if result["success"] else "failed")
-    return json.dumps(result, default=str)
+
 
 
 @tool
@@ -369,7 +358,7 @@ ALL_TOOLS = [
     convert_code,
     execute_sql,
     validate_output,
-    self_heal,
+
     finalize_migration,
     view_file,
     edit_file,

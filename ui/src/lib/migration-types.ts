@@ -4,7 +4,6 @@ export type StepId =
   | "apply_schema_mapping"
   | "convert_code"
   | "execute_sql"
-  | "self_heal"
   | "validate"
   | "human_review"
   | "finalize";

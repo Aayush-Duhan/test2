@@ -1,4 +1,9 @@
-"""Workflow routing decisions."""
+"""Workflow routing decisions.
+
+Note: The self-heal loop has been removed. Error recovery is now handled by the
+autonomous agent using view_file + edit_file tools, which avoids code truncation
+and allows flexible reasoning about fixes.
+"""
 
 import logging
 from datetime import datetime
@@ -12,17 +17,10 @@ def should_continue(state: MigrationContext) -> str:
     """Route after validation based on validation results."""
     logger.info("Making decision for project: %s", state.project_name)
     logger.info("Validation passed: %s", state.validation_passed)
-    logger.info(
-        "Self-heal iteration: %s/%s",
-        state.self_heal_iteration,
-        state.max_self_heal_iterations,
-    )
 
     decision = {
         "timestamp": datetime.now().isoformat(),
         "validation_passed": state.validation_passed,
-        "self_heal_iteration": state.self_heal_iteration,
-        "max_self_heal_iterations": state.max_self_heal_iterations,
         "validation_issues_count": len(state.validation_issues),
     }
 
@@ -40,22 +38,16 @@ def should_continue(state: MigrationContext) -> str:
         logger.info("Decision: Finalize (validation passed)")
         return "finalize"
 
-    if state.self_heal_iteration < state.max_self_heal_iterations:
-        decision["action"] = "self_heal"
-        decision["reason"] = "Issues found; continue self-heal"
-        state.decision_history.append(decision)
-        logger.info("Decision: Self-heal (iteration %s)", state.self_heal_iteration + 1)
-        return "self_heal"
-
+    # Validation failed — the agent will handle errors via view_file + edit_file
     decision["action"] = "human_review"
-    decision["reason"] = "Max iterations reached; human intervention required"
+    decision["reason"] = "Validation failed; agent will handle via tools"
     state.requires_human_intervention = True
     state.human_intervention_reason = (
-        f"Could not resolve {len(state.validation_issues)} issue(s) "
-        f"after {state.max_self_heal_iterations} iteration(s)."
+        f"{len(state.validation_issues)} validation issue(s) found. "
+        "The agent will attempt to fix them using file inspection and editing."
     )
     state.decision_history.append(decision)
-    logger.info("Decision: Human review (max iterations reached)")
+    logger.info("Decision: Human review (validation failed, agent handles fixes)")
     return "human_review"
 
 
@@ -91,7 +83,13 @@ def should_continue_after_execute(state: MigrationContext) -> str:
         state.decision_history.append(decision)
         return "human_review"
 
-    decision["action"] = "self_heal"
-    decision["reason"] = "Execution failed with non-missing-object error"
+    # Execution failed (non-missing-object error) — agent handles via tools
+    decision["action"] = "human_review"
+    decision["reason"] = "Execution failed; agent will fix via view_file + edit_file"
+    state.requires_human_intervention = True
+    state.human_intervention_reason = (
+        "Execution failed with errors. The agent will inspect and fix the SQL."
+    )
     state.decision_history.append(decision)
-    return "self_heal"
+    logger.info("Decision: Human review (execution error, agent handles fixes)")
+    return "human_review"
