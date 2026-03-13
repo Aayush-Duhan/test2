@@ -3,11 +3,28 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Callable, Dict, List, Tuple
 
 from agentic_core.models.context import MigrationContext
 
 logger = logging.getLogger(__name__)
+
+
+def _is_comment_only(stmt: str) -> bool:
+    """Return True if *stmt* contains only SQL comments (no executable code).
+
+    Handles:
+      - Single-line comments:  -- ...
+      - Block comments:        /* ... */
+      - SnowConvert markers:   /*** ... ***/
+    """
+    # Remove block comments (including nested /*** ***/ markers)
+    cleaned = re.sub(r"/\*.*?\*/", "", stmt, flags=re.DOTALL)
+    # Remove single-line comments
+    cleaned = re.sub(r"--[^\n]*", "", cleaned)
+    # If nothing remains after stripping whitespace, it's comment-only
+    return not cleaned.strip()
 
 
 class SQLExecutionError(Exception):
@@ -87,7 +104,7 @@ def split_sql_statements(sql_text: str) -> List[str]:
 
         if char == ";" and not in_single and not in_double and not in_dollar:
             stmt = "".join(buf).strip()
-            if stmt:
+            if stmt and not _is_comment_only(stmt):
                 statements.append(stmt)
             buf = []
             idx += 1
@@ -98,7 +115,7 @@ def split_sql_statements(sql_text: str) -> List[str]:
         idx += 1
 
     tail = "".join(buf).strip()
-    if tail:
+    if tail and not _is_comment_only(tail):
         statements.append(tail)
     return statements
 
@@ -139,6 +156,9 @@ def execute_sql_statements(
     cursor = connection.cursor()
     try:
         for idx, statement in enumerate(statements):
+            # Skip comment-only statements that slipped through
+            if _is_comment_only(statement):
+                continue
             try:
                 cursor.execute(statement)
                 rows = cursor.fetchall()

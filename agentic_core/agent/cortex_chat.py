@@ -92,19 +92,29 @@ def call_cortex_complete(
         merged.append({"role": "user", "content": "Please proceed."})
 
     message_json = json.dumps(merged)
-    options = {
+    options_json = json.dumps({
         "temperature": temperature,
         "top_p": top_p,
         "max_tokens": max_tokens,
-    }
-    options_json = json.dumps(options)
+    })
+
+    # Dollar-quoting ($$..$$) is the safest way to embed JSON in
+    # Snowflake SQL — it treats everything inside as literal text
+    # (no backslash or quote escaping).
+    #
+    # However, if the conversation contains SQL stored procedure code
+    # that also uses $$ as body delimiters, it prematurely closes the
+    # quoting.  Fix: replace $$ → $ $ in the payload so it can't collide.
+    # This only affects what the LLM sees, not any actual files.
+    safe_msg = message_json.replace("$$", "$ $")
+    safe_opts = options_json.replace("$$", "$ $")
 
     sql_stmt = f"""
         SELECT snowflake.cortex.complete(
             '{model_name}',
-            parse_json($${message_json}$$),
-            parse_json($${options_json}$$)
-        ) AS llm_response;
+            parse_json($${safe_msg}$$),
+            parse_json($${safe_opts}$$)
+        ) AS llm_response
     """
 
     try:
@@ -119,3 +129,7 @@ def call_cortex_complete(
 
     response = json.loads(rows[0]["LLM_RESPONSE"])
     return response["choices"][0]["messages"]
+
+
+
+
