@@ -56,8 +56,13 @@ def _strip_markdown_fences(text: str) -> str:
 
 
 def remove_enclosed_strings(text: str) -> str:
-    """Remove enclosed strings marked with !!!RESOLVE EWI!!! markers."""
-    return re.sub(r"!!!RESOLVE EWI!!!.*?\*\*\*/!!!", "", text, flags=re.DOTALL)
+    """Remove enclosed strings marked with !!!RESOLVE EWI!!! markers.
+
+    Delegates to the comprehensive ewi_cleanup module which handles
+    all EWI patterns including the associated CHECK clauses.
+    """
+    from agentic_core.services.ewi_cleanup import clean_ewi_markers
+    return clean_ewi_markers(text)
 
 
 def extract_database_from_code(code: str) -> Optional[str]:
