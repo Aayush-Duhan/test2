@@ -16,9 +16,24 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from typing import Any, Callable, Optional
+
+from agentic_core.agent.context_logger import (
+    start_log,
+    close_log,
+    log_iteration_start,
+    log_llm_request,
+    log_llm_response,
+    log_llm_error,
+    log_parsed_action,
+    log_tool_start,
+    log_tool_result,
+    log_user_message,
+    log_stopping,
+)
 
 from agentic_core.agent.cortex_chat import call_cortex_complete, get_cortex_session
 from agentic_core.agent.tools import (
@@ -244,6 +259,15 @@ def run_agent_loop(
     set_active_context(session_id, context)
     set_step_callback(session_id, step_callback)
 
+    # Start the persistent context log
+    log_file = start_log(
+        session_id,
+        context.project_path or os.path.join(os.getcwd(), "agent_logs"),
+        project_name=context.project_name or "unknown",
+        source_language=context.source_language or "teradata",
+    )
+    logger.info("Agent context log: %s", log_file)
+
     # Get Snowpark session for Cortex calls
     sf_session = get_cortex_session(context)
 
@@ -271,12 +295,14 @@ def run_agent_loop(
     try:
         for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
             logger.info("Agent iteration %d", iteration)
+            log_iteration_start(session_id, iteration)
 
             # ── Check for user messages ────────────────────────
             if user_message_getter and iteration > 1:
                 user_msg = user_message_getter()
                 if user_msg and user_msg.strip():
                     emit("user", "user_input", user_msg)
+                    log_user_message(session_id, user_msg)
                     # Need to ensure role alternation — if last message is user,
                     # we can't add another user message
                     if conversation[-1]["role"] == "user":
@@ -285,6 +311,7 @@ def run_agent_loop(
                         conversation.append({"role": "user", "content": user_msg})
 
             # ── Call Cortex ────────────────────────────────────
+            log_llm_request(session_id, len(conversation))
             try:
                 response_text = call_cortex_complete(
                     sf_session,
@@ -294,14 +321,19 @@ def run_agent_loop(
             except Exception as exc:
                 error_msg = f"Agent LLM call failed: {exc}"
                 logger.error(error_msg)
+                log_llm_error(session_id, error_msg)
                 emit("error", "run_status", error_msg)
+                log_stopping(session_id, error_msg)
                 break
+
+            log_llm_response(session_id, response_text)
 
             # Add assistant response to conversation
             conversation.append({"role": "assistant", "content": response_text})
 
             # ── Parse action ───────────────────────────────────
             tool_name, tool_session_id, reasoning, extra_args = parse_action(response_text)
+            log_parsed_action(session_id, tool_name, reasoning, extra_args)
 
             # Emit the reasoning/text part
             if reasoning:
@@ -314,10 +346,13 @@ def run_agent_loop(
             if tool_name is None:
                 updated_ctx = get_active_context(session_id)
                 if updated_ctx.current_stage == MigrationState.COMPLETED:
+                    log_stopping(session_id, "Migration completed")
                     break
                 if updated_ctx.requires_ddl_upload:
+                    log_stopping(session_id, "DDL upload required")
                     break
                 if updated_ctx.current_stage == MigrationState.HUMAN_REVIEW:
+                    log_stopping(session_id, "Human review required")
                     break
 
                 # Agent responded without a tool call — might be answering a user
@@ -332,6 +367,7 @@ def run_agent_loop(
             # ── Execute tool ───────────────────────────────────
             logger.info("Agent calling tool: %s", tool_name)
             emit("system", "step_started", f"Executing: {tool_name}")
+            log_tool_start(session_id, tool_name)
 
             tool_result = execute_tool(tool_name, tool_session_id or session_id, extra_args)
 
@@ -346,6 +382,8 @@ def run_agent_loop(
                 summary = tool_result[:200]
                 step_status = "completed"
 
+            log_tool_result(session_id, tool_name, tool_result, success, summary)
+
             # Add tool result as a user message (maintaining role alternation)
             tool_result_msg = f"Tool `{tool_name}` result:\n```json\n{tool_result}\n```"
             conversation.append({"role": "user", "content": tool_result_msg})
@@ -354,15 +392,18 @@ def run_agent_loop(
             updated_ctx = get_active_context(session_id)
             if updated_ctx.current_stage == MigrationState.COMPLETED:
                 emit("system", "run_status", "Migration completed successfully!")
+                log_stopping(session_id, "Migration completed successfully")
                 break
             if updated_ctx.requires_ddl_upload:
                 emit("system", "run_status",
                      "DDL upload required. The agent will resume after you upload the required DDL.")
+                log_stopping(session_id, "DDL upload required")
                 break
 
         return get_active_context(session_id)
 
     finally:
+        close_log(session_id)
         # Close Snowpark session
         try:
             sf_session.close()
