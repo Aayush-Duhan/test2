@@ -41,7 +41,9 @@ using tools and communicate with the user.
 
 ## Available Tools
 
-Each tool takes `session_id` as its only argument. The session_id is: {session_id}
+### Pipeline Tools (session_id only)
+
+The session_id is: {session_id}
 
 | Tool | Description |
 |------|-------------|
@@ -51,19 +53,37 @@ Each tool takes `session_id` as its only argument. The session_id is: {session_i
 | convert_code | Convert source SQL to Snowflake SQL |
 | execute_sql | Execute converted SQL on Snowflake |
 | validate_output | Validate the conversion quality |
-| self_heal | Fix issues using LLM-guided repair |
+| self_heal | Fix issues using LLM-guided repair (legacy, avoid for large files) |
 | finalize_migration | Generate final report (only after success) |
+
+### File Tools (multi-argument)
+
+These tools allow you to inspect and surgically edit converted SQL files \
+without rewriting the entire file. Use these instead of self_heal for targeted fixes.
+
+| Tool | Arguments | Description |
+|------|-----------|-------------|
+| get_converted_file_info | session_id | Get metadata (paths, total lines, size) of converted files |
+| view_file | session_id, file_path, start_line, end_line | View a section of a file with line numbers |
+| edit_file | session_id, file_path, start_line, end_line, new_content | Replace a range of lines with new content |
 
 ## How to Call a Tool
 
-To call a tool, include EXACTLY this JSON block in your response:
-
+For pipeline tools (session_id only):
 ```json
 {{"action": "TOOL_NAME", "session_id": "{session_id}"}}
 ```
 
-You may include explanation text BEFORE the JSON block, but the JSON block \
-must be the last thing in your response. Only call ONE tool per response.
+For file tools (with additional arguments):
+```json
+{{"action": "view_file", "session_id": "{session_id}", "args": {{"file_path": "/path/to/file.sql", "start_line": 1, "end_line": 100}}}}
+```
+
+```json
+{{"action": "edit_file", "session_id": "{session_id}", "args": {{"file_path": "/path/to/file.sql", "start_line": 45, "end_line": 48, "new_content": "-- fixed SQL here\nSELECT 1;"}}}}
+```
+
+Only call ONE tool per response. Include explanation text BEFORE the JSON block.
 
 ## How to Send a Final Message (No Tool)
 
@@ -75,11 +95,23 @@ or responding to the user), just write your message normally WITHOUT any JSON bl
 1. Start with init_project → add_source_code → apply_schema_mapping → convert_code → execute_sql
 2. After execute_sql:
    - Success → validate_output → finalize_migration
-   - Errors (NOT missing objects) → self_heal → execute_sql (retry up to 5 times)
+   - Errors (NOT missing objects) → use view_file + edit_file to fix the specific error, then execute_sql again (retry up to 5 times)
    - Missing objects / DDL needed → tell the user, STOP (do not retry)
 3. After validate_output:
    - Passed → finalize_migration
-   - Failed → self_heal → execute_sql again
+   - Failed → use view_file + edit_file to fix, then execute_sql again
+
+## Self-Heal Strategy (IMPORTANT)
+
+When you encounter execution or validation errors:
+1. Call get_converted_file_info to see the file paths and sizes
+2. Use the error message to identify the problematic area
+3. Call view_file to examine the relevant section of the file (around the error)
+4. Call edit_file to apply a targeted fix to ONLY the affected lines
+5. Do NOT rewrite the entire file. Only change the lines that need fixing.
+6. After editing, call execute_sql to retry
+
+This approach prevents code truncation on large files.
 
 ## Rules
 - Before each tool call, briefly explain what you are doing and why.
@@ -87,6 +119,7 @@ or responding to the user), just write your message normally WITHOUT any JSON bl
 - If you encounter errors, explain them clearly.
 - When the user sends a message, respond helpfully.
 - Be concise but informative.
+- NEVER use self_heal for large files. Use view_file + edit_file instead.
 
 ## Project Info
 Source language: {source_language}
@@ -97,58 +130,89 @@ Has schema mapping: {has_schema_mapping}
 # ── Action parsing ─────────────────────────────────────────────
 
 _ACTION_PATTERN = re.compile(
-    r'\{\s*"action"\s*:\s*"(\w+)"\s*,\s*"session_id"\s*:\s*"([^"]+)"\s*\}',
+    r'\{\s*"action"\s*:\s*"(\w+)"\s*,\s*"session_id"\s*:\s*"([^"]+)"\s*(?:,\s*"args"\s*:\s*(\{[^}]*\}))?\s*\}',
     re.DOTALL,
 )
 
-# Also match code-fenced JSON blocks
-_FENCED_ACTION_PATTERN = re.compile(
-    r'```(?:json)?\s*\n?\s*\{\s*"action"\s*:\s*"(\w+)"\s*,\s*"session_id"\s*:\s*"([^"]+)"\s*\}\s*\n?\s*```',
+# Also match code-fenced JSON blocks — captures the full JSON for re-parsing
+_FENCED_JSON_PATTERN = re.compile(
+    r'```(?:json)?\s*\n?(\{.*?\})\s*\n?```',
     re.DOTALL,
 )
 
 VALID_TOOL_NAMES = {t.name for t in ALL_TOOLS}
 
 
-def parse_action(response_text: str) -> tuple[str | None, str | None, str]:
+def parse_action(response_text: str) -> tuple[str | None, str | None, str, dict]:
     """Parse tool action from LLM response.
 
     Returns:
-        (tool_name, session_id, reasoning_text)
+        (tool_name, session_id, reasoning_text, extra_args)
         tool_name is None if no action was found.
+        extra_args is a dict of additional arguments (from "args" key).
     """
-    # Try fenced block first
-    match = _FENCED_ACTION_PATTERN.search(response_text)
-    if match:
-        tool_name, session_id = match.group(1), match.group(2)
-        reasoning = response_text[:match.start()].strip()
-        if tool_name in VALID_TOOL_NAMES:
-            return tool_name, session_id, reasoning
+    def _try_parse_json_block(text: str) -> tuple[str | None, str | None, str, dict]:
+        """Attempt to parse a JSON action block from text."""
+        try:
+            data = json.loads(text)
+            action = data.get("action")
+            sid = data.get("session_id")
+            args = data.get("args", {})
+            if action and action in VALID_TOOL_NAMES and sid:
+                return action, sid, "", args if isinstance(args, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return None, None, "", {}
 
-    # Try bare JSON
+    # Try fenced block first
+    match = _FENCED_JSON_PATTERN.search(response_text)
+    if match:
+        tool_name, session_id, _, args = _try_parse_json_block(match.group(1))
+        if tool_name:
+            reasoning = response_text[:match.start()].strip()
+            return tool_name, session_id, reasoning, args
+
+    # Try bare JSON — find the last { that looks like an action
     match = _ACTION_PATTERN.search(response_text)
     if match:
         tool_name, session_id = match.group(1), match.group(2)
-        reasoning = response_text[:match.start()].strip()
+        # Try to parse the full JSON block for args
+        # Find the full JSON starting from this match
+        json_start = match.start()
+        # Try to find the complete JSON by parsing from the match start
+        remaining = response_text[json_start:]
+        _, _, _, args = _try_parse_json_block(remaining.strip())
+        if not args and match.group(3):
+            try:
+                args = json.loads(match.group(3))
+            except (json.JSONDecodeError, TypeError):
+                args = {}
+        reasoning = response_text[:json_start].strip()
         if tool_name in VALID_TOOL_NAMES:
-            return tool_name, session_id, reasoning
+            return tool_name, session_id, reasoning, args
 
-    return None, None, response_text.strip()
+    return None, None, response_text.strip(), {}
 
 
 # ── Tool dispatch ──────────────────────────────────────────────
 
 _TOOL_MAP = {t.name: t for t in ALL_TOOLS}
 
+# Tools that accept extra arguments beyond session_id
+_MULTI_ARG_TOOLS = {"view_file", "edit_file"}
 
-def execute_tool(tool_name: str, session_id: str) -> str:
+
+def execute_tool(tool_name: str, session_id: str, extra_args: dict | None = None) -> str:
     """Execute a tool by name and return the result string."""
     tool_fn = _TOOL_MAP.get(tool_name)
     if tool_fn is None:
         return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
     try:
-        result = tool_fn.invoke({"session_id": session_id})
+        invoke_args = {"session_id": session_id}
+        if extra_args and tool_name in _MULTI_ARG_TOOLS:
+            invoke_args.update(extra_args)
+        result = tool_fn.invoke(invoke_args)
         return result if isinstance(result, str) else json.dumps(result, default=str)
     except Exception as exc:
         return json.dumps({"error": f"Tool {tool_name} failed: {exc}"})
@@ -237,7 +301,7 @@ def run_agent_loop(
             conversation.append({"role": "assistant", "content": response_text})
 
             # ── Parse action ───────────────────────────────────
-            tool_name, tool_session_id, reasoning = parse_action(response_text)
+            tool_name, tool_session_id, reasoning, extra_args = parse_action(response_text)
 
             # Emit the reasoning/text part
             if reasoning:
@@ -269,7 +333,7 @@ def run_agent_loop(
             logger.info("Agent calling tool: %s", tool_name)
             emit("system", "step_started", f"Executing: {tool_name}")
 
-            tool_result = execute_tool(tool_name, tool_session_id or session_id)
+            tool_result = execute_tool(tool_name, tool_session_id or session_id, extra_args)
 
             # Parse result for summary
             try:

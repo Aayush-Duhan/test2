@@ -87,7 +87,16 @@ def apply_self_healing(
     statement_type: str = "mixed",
     logger_callback: Optional[Callable[[str], None]] = None,
 ) -> SelfHealResult:
-    """Apply self-healing to code using Snowflake Cortex through LangChain."""
+    """Apply self-healing to code using targeted edits via Snowflake Cortex.
+
+    Instead of asking the LLM to return the entire fixed code (which gets
+    truncated for large files due to the 4096 max_tokens limit), this function:
+
+    1. Identifies the error context (failed statements + surrounding lines)
+    2. Shows only the relevant numbered section to the LLM
+    3. Instructs the LLM to return JSON edit operations
+    4. Applies edits programmatically to the original code
+    """
     if logger_callback is None:
         logger_callback = logger.info
 
@@ -122,11 +131,22 @@ def apply_self_healing(
     model_name = model_name or "claude-4-sonnet"
     cortex_function = (os.getenv("SNOWFLAKE_CORTEX_FUNCTION") or "complete").strip() or "complete"
     cleaned_code = remove_enclosed_strings(code)
-    prompt_code = cleaned_code.replace("$$", "$ $")
+
+    # --- Build numbered code context ---
+    code_lines = cleaned_code.splitlines()
+    total_lines = len(code_lines)
+
+    # Build numbered view of the code for the LLM
+    numbered_lines = []
+    for i, line in enumerate(code_lines, start=1):
+        numbered_lines.append(f"{i}: {line}")
+    numbered_code = "\n".join(numbered_lines)
+
     issue_text = "\n".join(
         f"- [{issue.get('severity', 'error')}] {issue.get('message', issue)}"
         for issue in issues
     ) or "- No explicit issues provided"
+
     fix_strategy = {
         "ddl": "Prioritize object-creation order, dependencies, and Snowflake DDL compatibility.",
         "dml": "Prioritize column mapping, joins, update semantics, and data type compatibility.",
@@ -144,19 +164,33 @@ def apply_self_healing(
 
     prompt = (
         "You are a Snowflake SQL migration repair assistant.\n"
-        "Use only the provided context and do not hallucinate missing requirements.\n"
-        "Do not invent missing objects unless explicitly referenced in runtime errors or actionable report issues.\n"
-        "Return only corrected SQL code with no commentary, no markdown, and no code fences.\n"
+        "The following SQL code has errors that need to be fixed.\n"
+        "The code is shown with LINE NUMBERS for reference.\n\n"
+        "IMPORTANT: Do NOT return the entire file. Instead, return ONLY a JSON object\n"
+        "with targeted edit operations that fix the specific errors.\n\n"
+        "Return format (JSON only, no markdown, no commentary):\n"
+        '{"edits": [\n'
+        '  {"start_line": <first line to replace>, "end_line": <last line to replace>, "new_content": "<replacement text>"},\n'
+        '  ...\n'
+        ']}\n\n'
+        "Rules:\n"
+        "- start_line and end_line are 1-indexed line numbers from the code below\n"
+        "- new_content replaces ALL lines from start_line to end_line (inclusive)\n"
+        "- Use \\n for newlines inside new_content\n"
+        "- Only include the lines that need to change\n"
+        "- Do NOT include unchanged lines in your edits\n"
+        "- Return valid JSON only, no other text\n\n"
         f"Statement type: {statement_type or 'mixed'}\n"
         f"Repair strategy: {fix_strategy}\n"
-        f"Iteration: {iteration}\n\n"
+        f"Iteration: {iteration}\n"
+        f"Total lines in file: {total_lines}\n\n"
         f"Validation/Runtime Issues:\n{issue_text}\n\n"
         f"Report Scan Summary: {json.dumps(report_scan_summary, ensure_ascii=False)}\n"
-        f"Ignored Report Codes (non-actionable unless runtime errors): {json.dumps(ignored_codes, ensure_ascii=False)}\n"
+        f"Ignored Report Codes: {json.dumps(ignored_codes, ensure_ascii=False)}\n"
         f"Actionable Report Issues: {json.dumps(actionable_issues, ensure_ascii=False)}\n"
         f"Latest Execution Errors: {json.dumps(execution_errors, ensure_ascii=False)}\n"
         f"Failed Statements: {json.dumps(failed_statements, ensure_ascii=False)}\n\n"
-        f"Code to Fix:\n{prompt_code}"
+        f"Code (with line numbers):\n{numbered_code}"
     )
 
     try:
@@ -167,7 +201,7 @@ def apply_self_healing(
             temperature=0,
         )
         response = chat_model.invoke(prompt)
-        fixed_code = _strip_markdown_fences(
+        raw_response = _strip_markdown_fences(
             _extract_model_text(getattr(response, "content", response))
         )
     except Exception as exc:
@@ -198,15 +232,96 @@ def apply_self_healing(
         except Exception:
             pass
 
-    if not fixed_code:
-        fixed_code = cleaned_code
+    if not raw_response:
+        return SelfHealResult(
+            success=False,
+            fixed_code=cleaned_code,
+            fixes_applied=[],
+            issues_fixed=0,
+            error_message="LLM returned empty response",
+            iteration=iteration,
+        )
 
-    logger_callback(f"LLM response (iteration {iteration}, model {model_name}):\n{fixed_code}")
+    logger_callback(f"LLM response (iteration {iteration}, model {model_name}):\n{raw_response}")
+
+    # --- Parse and apply edit operations ---
+    fixed_code = cleaned_code
+    fixes_applied: List[str] = []
+
+    try:
+        edit_data = json.loads(raw_response)
+        edits = edit_data.get("edits", [])
+
+        if not edits:
+            logger_callback("LLM returned no edits — code may already be correct or LLM could not identify fixes.")
+            return SelfHealResult(
+                success=True,
+                fixed_code=cleaned_code,
+                fixes_applied=["No edits returned by LLM"],
+                issues_fixed=0,
+                iteration=iteration,
+            )
+
+        # Sort edits by start_line descending to apply bottom-up
+        sorted_edits = sorted(edits, key=lambda e: e.get("start_line", 0), reverse=True)
+        result_lines = code_lines.copy()
+
+        for edit in sorted_edits:
+            start = int(edit.get("start_line", 0))
+            end = int(edit.get("end_line", 0))
+            new_content = str(edit.get("new_content", ""))
+
+            if start < 1 or end < start or start > total_lines:
+                logger_callback(f"Skipping invalid edit: start={start}, end={end}")
+                continue
+
+            end = min(end, len(result_lines))
+
+            # Split new_content into lines
+            new_lines = new_content.split("\n") if new_content else []
+
+            # Replace lines (0-indexed)
+            result_lines[start - 1 : end] = new_lines
+            fixes_applied.append(
+                f"Replaced lines {start}-{end} ({end - start + 1} lines) "
+                f"with {len(new_lines)} lines"
+            )
+
+        fixed_code = "\n".join(result_lines)
+        logger_callback(f"Applied {len(fixes_applied)} edit(s) successfully")
+
+    except json.JSONDecodeError:
+        # LLM didn't return valid JSON — try to use the response as raw SQL
+        logger_callback("LLM response was not valid JSON. Attempting to use as raw SQL fix.")
+        # Only use if the response looks like it contains SQL
+        if any(kw in raw_response.upper() for kw in ("SELECT", "CREATE", "ALTER", "INSERT", "UPDATE", "DELETE")):
+            fixed_code = raw_response
+            fixes_applied.append("Used raw LLM response as full code replacement (JSON parse failed)")
+        else:
+            return SelfHealResult(
+                success=False,
+                fixed_code=cleaned_code,
+                fixes_applied=[],
+                issues_fixed=0,
+                error_message="LLM response was not valid JSON and did not contain SQL",
+                iteration=iteration,
+            )
+    except Exception as exc:
+        error_msg = f"Error applying edits: {exc}"
+        logger_callback(error_msg)
+        return SelfHealResult(
+            success=False,
+            fixed_code=cleaned_code,
+            fixes_applied=[],
+            issues_fixed=0,
+            error_message=error_msg,
+            iteration=iteration,
+        )
 
     return SelfHealResult(
         success=True,
         fixed_code=fixed_code,
-        fixes_applied=[f"Applied LLM-guided repair via Snowflake Cortex ({model_name})"],
+        fixes_applied=fixes_applied or [f"Applied LLM-guided targeted repair via Snowflake Cortex ({model_name})"],
         issues_fixed=len(issues),
         iteration=iteration,
     )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import traceback
 from datetime import datetime
 from typing import Any, Callable, Optional
@@ -19,6 +20,12 @@ from agentic_core.nodes.execute_sql import execute_sql_node
 from agentic_core.nodes.validate import validate_node
 from agentic_core.nodes.self_heal import self_heal_node
 from agentic_core.nodes.finalize import finalize_node
+from agentic_core.services.file_tools import (
+    view_file_section,
+    edit_file_section,
+    get_file_info,
+    apply_edit_operations,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +257,109 @@ def finalize_migration(session_id: str) -> str:
     return json.dumps(result, default=str)
 
 
+@tool
+def view_file(session_id: str, file_path: str = "", start_line: int = 1, end_line: int = 0) -> str:
+    """View a section of a SQL file with line numbers.
+
+    Args:
+        session_id: The active migration session ID.
+        file_path: Absolute path to the file to view. If empty, views the
+            first converted file for the session.
+        start_line: First line to return (1-indexed, inclusive). Default: 1.
+        end_line: Last line to return (1-indexed, inclusive). Default: 0
+            means start_line + 99 (view 100 lines).
+
+    Returns:
+        JSON with numbered file content, total_lines, and file metadata.
+    """
+    ctx = get_active_context(session_id)
+
+    # Resolve file path if not provided
+    if not file_path:
+        if ctx.converted_files:
+            file_path = ctx.converted_files[0]
+        else:
+            return json.dumps({"error": "No file_path provided and no converted files on context."})
+
+    actual_end = end_line if end_line > 0 else None
+    result = view_file_section(file_path, start_line, actual_end)
+    return json.dumps(result, default=str)
+
+
+@tool
+def edit_file(
+    session_id: str,
+    file_path: str = "",
+    start_line: int = 0,
+    end_line: int = 0,
+    new_content: str = "",
+) -> str:
+    """Replace lines [start_line, end_line] in a file with new_content.
+
+    The agent should use view_file first to inspect the area, then call this
+    tool to apply targeted fixes without rewriting the entire file.
+
+    Args:
+        session_id: The active migration session ID.
+        file_path: Absolute path to the file to edit. If empty, edits the
+            first converted file for the session.
+        start_line: First line to replace (1-indexed, inclusive).
+        end_line: Last line to replace (1-indexed, inclusive).
+        new_content: Replacement text. May be more or fewer lines than the
+            range being replaced.
+
+    Returns:
+        JSON with success status, lines removed/added, and new total lines.
+    """
+    ctx = get_active_context(session_id)
+
+    # Resolve file path if not provided
+    if not file_path:
+        if ctx.converted_files:
+            file_path = ctx.converted_files[0]
+        else:
+            return json.dumps({"error": "No file_path provided and no converted files on context."})
+
+    if start_line < 1 or end_line < 1:
+        return json.dumps({"error": "start_line and end_line must be >= 1"})
+
+    result = edit_file_section(file_path, start_line, end_line, new_content)
+
+    # Sync the in-memory converted_code with the edited file
+    if result.get("success") and file_path in (ctx.converted_files or []):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                ctx.converted_code = f.read()
+            set_active_context(session_id, ctx)
+        except Exception:
+            pass
+
+    return json.dumps(result, default=str)
+
+
+@tool
+def get_converted_file_info(session_id: str) -> str:
+    """Get metadata about the converted SQL files (total lines, file size, paths).
+
+    Call this before view_file to understand the file structure.
+    """
+    ctx = get_active_context(session_id)
+    files = ctx.converted_files or []
+
+    if not files and ctx.converted_code:
+        return json.dumps({
+            "source": "in_memory",
+            "total_lines": len(ctx.converted_code.splitlines()),
+            "size_bytes": len(ctx.converted_code.encode("utf-8")),
+        })
+
+    info_list = []
+    for fp in files:
+        info_list.append(get_file_info(fp))
+
+    return json.dumps({"files": info_list}, default=str)
+
+
 # ── Tool registry ──────────────────────────────────────────────
 
 ALL_TOOLS = [
@@ -261,4 +371,7 @@ ALL_TOOLS = [
     validate_output,
     self_heal,
     finalize_migration,
+    view_file,
+    edit_file,
+    get_converted_file_info,
 ]
