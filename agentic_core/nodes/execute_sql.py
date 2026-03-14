@@ -9,7 +9,6 @@ from agentic_core.models.context import MigrationContext, MigrationState
 from agentic_core.nodes.common import is_error_state
 from agentic_core.runtime.snowflake_execution import (
     build_snowflake_connection,
-    classify_snowflake_error,
     close_connection,
     execute_sql_statements,
 )
@@ -150,7 +149,6 @@ def execute_sql_node(state: MigrationContext) -> MigrationContext:
         return state
     except Exception as exc:
         error_message = str(exc)
-        error_type, object_name = ("execution_error", "")
         failed_statement = ""
         failed_statement_index = -1
         partial_results: List[Dict[str, Any]] = []
@@ -159,17 +157,12 @@ def execute_sql_node(state: MigrationContext) -> MigrationContext:
             failed_statement = str(getattr(exc, "statement", ""))
             failed_statement_index = int(getattr(exc, "statement_index", -1))
             partial_results = list(getattr(exc, "partial_results", []) or [])
-        try:
-            error_type, object_name = classify_snowflake_error(error_message)
-        except Exception:
-            pass
 
         state.execution_passed = False
         state.execution_errors.append(
             {
-                "type": error_type,
+                "type": "execution_error",
                 "message": error_message,
-                "object_name": object_name,
                 "stage": "execute_sql",
                 "statement": failed_statement,
                 "statement_index": failed_statement_index,
@@ -182,32 +175,13 @@ def execute_sql_node(state: MigrationContext) -> MigrationContext:
                 else "unknown",
                 "index": state.last_executed_file_index + 1,
                 "status": "failed",
-                "error_type": error_type,
+                "error_type": "execution_error",
                 "error_message": error_message,
-                "missing_object": object_name,
                 "statements": partial_results,
                 "failed_statement": failed_statement,
                 "failed_statement_index": failed_statement_index,
             }
         )
-
-        if error_type == "missing_object":
-            if object_name:
-                normalized_obj = object_name.strip()
-                if normalized_obj and normalized_obj not in state.missing_objects:
-                    state.missing_objects.append(normalized_obj)
-            state.requires_ddl_upload = True
-            state.requires_human_intervention = True
-            state.resume_from_stage = "execute_sql"
-            state.current_stage = MigrationState.HUMAN_REVIEW
-            missing_detail = ", ".join(state.missing_objects) if state.missing_objects else "unresolved object"
-            state.human_intervention_reason = (
-                f"Missing object detected during execution: {missing_detail}. "
-                "Upload DDL script to create required objects, then resume."
-            )
-            log_event(state, "warning", state.human_intervention_reason)
-            state.updated_at = datetime.now()
-            return state
 
         state.validation_issues.append(
             {"type": "execution_error", "severity": "error", "message": error_message}

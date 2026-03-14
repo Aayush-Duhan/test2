@@ -6,7 +6,6 @@ from agentic_core.models.context import MigrationContext
 from agentic_core.runtime.snowflake_auth import (
     SnowflakeAuthConfig,
     create_snowpark_session,
-    resolve_password_from_sources,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,12 +34,7 @@ def get_snowflake_session(state: MigrationContext):
             authenticator=(state.sf_authenticator or "").strip() or "externalbrowser",
         )
 
-        password = resolve_password_from_sources(
-            authenticator=config.authenticator,
-            explicit_password=None,
-        )
-
-        session = create_snowpark_session(config, password=password)
+        session = create_snowpark_session(config)
         logger.info("Snowflake session created successfully")
         return session
     except Exception as exc:

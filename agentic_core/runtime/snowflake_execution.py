@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List
 
 from agentic_core.models.context import MigrationContext
 
@@ -118,31 +118,6 @@ def split_sql_statements(sql_text: str) -> List[str]:
     if tail and not _is_comment_only(tail):
         statements.append(tail)
     return statements
-
-
-def classify_snowflake_error(error_message: str) -> Tuple[str, str]:
-    """Classify execution error type and extract likely missing object name."""
-    lowered = (error_message or "").lower()
-    missing_patterns = [
-        "does not exist or not authorized",
-        "does not exist",
-        "object does not exist",
-        "table does not exist",
-        "schema does not exist",
-    ]
-    if any(pattern in lowered for pattern in missing_patterns):
-        object_name = ""
-        for token in ("Object '", "object '", "Table '", "table '", '"'):
-            if token in (error_message or ""):
-                try:
-                    start = (error_message or "").index(token) + len(token)
-                    end = (error_message or "").index("'", start)
-                    object_name = (error_message or "")[start:end]
-                    break
-                except ValueError:
-                    continue
-        return "missing_object", object_name
-    return "execution_error", ""
 
 
 def execute_sql_statements(
