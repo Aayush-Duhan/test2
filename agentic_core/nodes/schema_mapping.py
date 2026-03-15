@@ -38,7 +38,6 @@ def apply_schema_mapping_node(state: MigrationContext) -> MigrationContext:
         os.makedirs(mapped_dir, exist_ok=True)
 
         def log_callback(msg: str) -> None:
-            state.warnings.append(str(msg))
             logger.info("Schema mapping: %s", msg)
             log_event(state, "info", f"Schema mapping: {msg}")
 

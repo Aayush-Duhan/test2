@@ -122,6 +122,7 @@ def process_sql_with_pandas_replace(
     sql_file_path,
     output_dir,
     logg=None,
+    detailed_log=False,
 ):
     summary_data = {}
     mapping_rows = _read_mapping_rows(csv_file_path)
@@ -172,12 +173,13 @@ def process_sql_with_pandas_replace(
             sp_count = 0
             inside_db_count = 0
             for before, after in zip(before_lines, after_lines):
-                logger.info(f"Before: {before}\n")
-                if logg:
-                    logg(f"Before: {before}\n")
-                logger.info(f"After: {after}\n")
-                if logg:
-                    logg(f"After: {after}\n")
+                if detailed_log:
+                    logger.info(f"Before: {before}\n")
+                    if logg:
+                        logg(f"Before: {before}\n")
+                    logger.info(f"After: {after}\n")
+                    if logg:
+                        logg(f"After: {after}\n")
                 sp_string = "REPLACE PROCEDURE"
                 if (sp_string in before) and (sp_string in after):
                     if before != after:

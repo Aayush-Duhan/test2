@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { ChevronLeft, ChevronRight, Check, Database, FileText, GitBranch, CheckCircle2, Code2, KeyRound, Github } from "lucide-react";
-import { GitHubImportModal, type GitHubImportMode } from "@/components/ui/github-import-modal";
+import { CodeHubImportModal } from "@/components/ui/codehub-import-modal";
 import {
   useWizardState,
   getVisibleWizardSteps,
@@ -132,7 +132,7 @@ const ScriptTypeStep = React.memo(function ScriptTypeStep() {
 const FilesStep = React.memo(function FilesStep() {
   const { sourceFiles } = useWizardState();
   const fileInputRef = React.useRef<HTMLInputElement>(null);
-  const [ghModalOpen, setGhModalOpen] = React.useState(false);
+  const [repoModalOpen, setRepoModalOpen] = React.useState(false);
 
   const handleFileUpload = React.useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
@@ -172,7 +172,7 @@ const FilesStep = React.memo(function FilesStep() {
     addSourceFiles(uploadedFiles);
   }, []);
 
-  const handleGitHubImport = React.useCallback((files: WizardFile[]) => {
+  const handleRepositoryImport = React.useCallback((files: WizardFile[]) => {
     addSourceFiles(files);
   }, []);
 
@@ -205,7 +205,7 @@ const FilesStep = React.memo(function FilesStep() {
         <p className="text-sm text-[#8a8a8f]">.sql, .ddl, .btq, .txt files supported</p>
       </div>
 
-      {/* Import from GitHub */}
+      {/* Import from GitHub Enterprise */}
       <div className="flex items-center gap-3">
         <div className="h-px flex-1 bg-[#333]" />
         <span className="text-xs text-[#666]">or</span>
@@ -214,18 +214,18 @@ const FilesStep = React.memo(function FilesStep() {
 
       <button
         type="button"
-        onClick={() => setGhModalOpen(true)}
+        onClick={() => setRepoModalOpen(true)}
         className="flex w-full items-center justify-center gap-2.5 rounded-lg border border-[#333] bg-[#1a1a1a] px-4 py-3 text-sm font-medium text-[#ccc] transition-all hover:border-[#4da5fc] hover:text-white hover:bg-[#4da5fc]/5"
       >
         <Github className="h-5 w-5" />
-        Import from GitHub
+        Import from GitHub Enterprise
       </button>
 
-      <GitHubImportModal
+      <CodeHubImportModal
         mode="source"
-        open={ghModalOpen}
-        onOpenChange={setGhModalOpen}
-        onImport={handleGitHubImport}
+        open={repoModalOpen}
+        onOpenChange={setRepoModalOpen}
+        onImport={handleRepositoryImport}
       />
 
       {/* File list */}
@@ -263,7 +263,7 @@ const FilesStep = React.memo(function FilesStep() {
 const MappingStep = React.memo(function MappingStep() {
   const { mappingFiles } = useWizardState();
   const fileInputRef = React.useRef<HTMLInputElement>(null);
-  const [ghModalOpen, setGhModalOpen] = React.useState(false);
+  const [repoModalOpen, setRepoModalOpen] = React.useState(false);
 
   const handleFileUpload = React.useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
@@ -303,7 +303,7 @@ const MappingStep = React.memo(function MappingStep() {
     addMappingFiles(uploadedFiles);
   }, []);
 
-  const handleGitHubImport = React.useCallback((files: WizardFile[]) => {
+  const handleRepositoryImport = React.useCallback((files: WizardFile[]) => {
     addMappingFiles(files);
   }, []);
 
@@ -336,7 +336,7 @@ const MappingStep = React.memo(function MappingStep() {
         <p className="text-sm text-[#8a8a8f]">.csv, .json mapping files supported</p>
       </div>
 
-      {/* Import from GitHub */}
+      {/* Import from GitHub Enterprise */}
       <div className="flex items-center gap-3">
         <div className="h-px flex-1 bg-[#333]" />
         <span className="text-xs text-[#666]">or</span>
@@ -345,18 +345,18 @@ const MappingStep = React.memo(function MappingStep() {
 
       <button
         type="button"
-        onClick={() => setGhModalOpen(true)}
+        onClick={() => setRepoModalOpen(true)}
         className="flex w-full items-center justify-center gap-2.5 rounded-lg border border-[#333] bg-[#1a1a1a] px-4 py-3 text-sm font-medium text-[#ccc] transition-all hover:border-[#4da5fc] hover:text-white hover:bg-[#4da5fc]/5"
       >
         <Github className="h-5 w-5" />
-        Import from GitHub
+        Import from GitHub Enterprise
       </button>
 
-      <GitHubImportModal
+      <CodeHubImportModal
         mode="mapping"
-        open={ghModalOpen}
-        onOpenChange={setGhModalOpen}
-        onImport={handleGitHubImport}
+        open={repoModalOpen}
+        onOpenChange={setRepoModalOpen}
+        onImport={handleRepositoryImport}
       />
 
       {/* File list */}

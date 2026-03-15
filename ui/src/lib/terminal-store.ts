@@ -9,7 +9,7 @@ import { atom, type WritableAtom } from 'nanostores';
 import type { Terminal as XTerm } from '@xterm/xterm';
 
 const BACKEND_HOST = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-const BACKEND_PORT = '8081'; // python execution service port
+const BACKEND_PORT = '8090'; // python execution service port
 
 interface TerminalSession {
   terminal: XTerm;

@@ -37,6 +37,20 @@ EXECUTION_TOKEN=local-dev-token
 PYTHON_EXECUTION_URL=http://127.0.0.1:8090
 ```
 
+## CodeHub Enterprise Import
+
+The setup wizard imports GitHub Enterprise repositories through CodeHub. Configure these server-side variables before using the import modal:
+
+```bash
+CODEHUB_API_BASE_URL=https://api.eyfabric.ey.com/codehub/gh-emu-api-v2
+CODEHUB_TENANT_ID=5b973f99-77df-4beb-b27d-aa0c70b8482c
+CODEHUB_CLIENT_ID=<service-principal-client-id>
+CODEHUB_CLIENT_SECRET=<service-principal-client-secret>
+CODEHUB_SCOPE=acbe03ed-0571-4765-8e24-9794730d5081/.default
+```
+
+Optional endpoint overrides are available in [.env.example](C:/Users/tanma/Downloads/ui/ui/.env.example) if your CodeHub read APIs use different branch/tree/file paths than the default templates.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
