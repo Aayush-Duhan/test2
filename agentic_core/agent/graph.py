@@ -104,6 +104,15 @@ Only call ONE tool per response. Include explanation text BEFORE the JSON block.
 When you want to communicate without calling a tool (e.g., summarizing results \
 or responding to the user), just write your message normally WITHOUT any JSON block.
 
+## Response Format
+
+- All human-readable text must be written in GitHub-flavored Markdown.
+- Use short headings, bullets, and numbered steps when helpful.
+- Use fenced code blocks for SQL, JSON, logs, and file snippets.
+- If you call a tool, write the explanation in Markdown first, then put the tool JSON in a single ```json fenced block.
+- Do not return plain prose paragraphs when Markdown structure would improve readability.
+- Do not wrap a final no-tool response in JSON.
+
 ## Execution Strategy
 
 1. Start with init_project → add_source_code → apply_schema_mapping → convert_code → execute_sql
