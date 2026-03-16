@@ -11,6 +11,7 @@ import { Workbench } from "@/components/workbench";
 import { workbenchStore, type UploadedFile } from "@/lib/workbench-store";
 import { createScopedLogger } from "@/lib/logger";
 import { useSnapScroll } from "@/hooks/useSnapScroll";
+import { Markdown } from "@/components/chat/Markdown";
 
 const logger = createScopedLogger('ChatPanel');
 
@@ -379,7 +380,9 @@ function ChatBubble({ message: m }: { message: ChatMessage }) {
     return (
       <div className="rounded-xl border border-emerald-400/15 bg-emerald-500/5 px-4 py-2.5 text-sm leading-relaxed text-white/90">
         <span className="mr-2 text-xs font-semibold uppercase tracking-wider text-emerald-400/60">Agent</span>
-        <span className="whitespace-pre-wrap">{m.content}</span>
+        <div className="mt-2 min-w-0">
+          <Markdown>{m.content}</Markdown>
+        </div>
       </div>
     );
   }

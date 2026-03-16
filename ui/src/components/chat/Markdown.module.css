@@ -1,0 +1,149 @@
+.markdownContent {
+  color: rgba(255, 255, 255, 0.92);
+  line-height: 1.6;
+}
+
+.markdownContent > *:not(:last-child) {
+  margin-block-end: 16px;
+}
+
+.markdownContent :global(.artifact) {
+  margin: 1.5em 0;
+}
+
+.markdownContent :is(h1, h2, h3, h4, h5, h6) {
+  margin-block-start: 24px;
+  margin-block-end: 16px;
+  color: rgba(255, 255, 255, 0.96);
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.markdownContent h1 {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  font-size: 2em;
+  padding-bottom: 0.3em;
+}
+
+.markdownContent h2 {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  font-size: 1.5em;
+  padding-bottom: 0.3em;
+}
+
+.markdownContent h3 {
+  font-size: 1.25em;
+}
+
+.markdownContent h4 {
+  font-size: 1em;
+}
+
+.markdownContent h5 {
+  font-size: 0.875em;
+}
+
+.markdownContent h6 {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 0.85em;
+}
+
+.markdownContent p {
+  white-space: pre-wrap;
+}
+
+.markdownContent p:not(:last-of-type) {
+  margin-block-end: 16px;
+}
+
+.markdownContent a {
+  color: rgb(110, 193, 255);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.markdownContent a:hover {
+  text-decoration: underline;
+}
+
+.markdownContent :not(pre) > code {
+  border-radius: 6px;
+  background-color: rgba(255, 255, 255, 0.08);
+  color: rgb(255, 228, 181);
+  font-family: ui-monospace, "Fira Code", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 13px;
+  padding: 0.2em 0.4em;
+}
+
+.markdownContent pre {
+  border-radius: 12px;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.markdownContent pre:has(> code) {
+  background: transparent;
+  font-family: ui-monospace, "Fira Code", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 13px;
+}
+
+.markdownContent :global(.shiki) {
+  background-color: rgba(0, 0, 0, 0.35) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  margin: 0;
+  overflow-x: auto;
+  padding: 20px 16px;
+}
+
+.markdownContent blockquote {
+  border-left: 0.25em solid rgba(255, 255, 255, 0.16);
+  color: rgba(255, 255, 255, 0.68);
+  margin: 0;
+  padding: 0 1em;
+}
+
+.markdownContent :is(ul, ol) {
+  margin-block-end: 16px;
+  margin-block-start: 0;
+  padding-left: 2em;
+}
+
+.markdownContent ul {
+  list-style-type: disc;
+}
+
+.markdownContent ol {
+  list-style-type: decimal;
+}
+
+.markdownContent li + li {
+  margin-block-start: 8px;
+}
+
+.markdownContent li > *:not(:last-child) {
+  margin-block-end: 16px;
+}
+
+.markdownContent hr {
+  background-color: rgba(255, 255, 255, 0.12);
+  border: 0;
+  height: 0.25em;
+  margin: 24px 0;
+  padding: 0;
+}
+
+.markdownContent table {
+  border-collapse: collapse;
+  margin-block-end: 16px;
+  width: 100%;
+}
+
+.markdownContent :is(th, td) {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 6px 13px;
+}
+
+.markdownContent tr:nth-child(2n) {
+  background-color: rgba(255, 255, 255, 0.03);
+}
