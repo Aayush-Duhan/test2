@@ -21,13 +21,36 @@ from agentic_core.nodes.validate import validate_node
 
 from agentic_core.nodes.finalize import finalize_node
 from agentic_core.services.file_tools import (
-    view_file_section,
+    FileAccessPolicy,
+    apply_edit_operations,
     edit_file_section,
     get_file_info,
-    apply_edit_operations,
+    list_directory,
+    make_directory as make_directory_fs,
+    read_file as read_file_content,
+    search_in_file,
+    view_file_section,
+    write_file_content,
 )
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_ALLOWED_EXTENSIONS = {
+    ".sql",
+    ".ddl",
+    ".btq",
+    ".txt",
+    ".csv",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".md",
+    ".html",
+    ".xml",
+    ".log",
+    ".ini",
+    ".cfg",
+}
 
 
 # ── Tool result helpers ─────────────────────────────────────────
@@ -141,6 +164,27 @@ def set_step_callback(session_id: str, cb: Optional[Callable]) -> None:
 
 def get_step_callback(session_id: str) -> Optional[Callable]:
     return _STEP_CALLBACK.get(session_id)
+
+
+def _get_file_policy(ctx: MigrationContext, *, allow_hidden: Optional[bool] = None) -> Optional[FileAccessPolicy]:
+    roots: list[str] = []
+    if ctx.project_path:
+        roots.append(os.path.abspath(ctx.project_path))
+    if ctx.output_path:
+        output_root = os.path.abspath(ctx.output_path)
+        if output_root not in roots:
+            roots.append(output_root)
+
+    if not roots:
+        return None
+
+    policy = FileAccessPolicy(
+        root_paths=roots,
+        allowed_extensions=_DEFAULT_ALLOWED_EXTENSIONS,
+    )
+    if allow_hidden is not None:
+        policy.allow_hidden = allow_hidden
+    return policy
 
 
 # ── Tool definitions ───────────────────────────────────────────
@@ -270,8 +314,9 @@ def view_file(session_id: str, file_path: str = "", start_line: int = 1, end_lin
         else:
             return json.dumps({"error": "No file_path provided and no converted files on context."})
 
+    policy = _get_file_policy(ctx)
     actual_end = end_line if end_line > 0 else None
-    result = view_file_section(file_path, start_line, actual_end)
+    result = view_file_section(file_path, start_line, actual_end, policy=policy)
     return json.dumps(result, default=str)
 
 
@@ -312,7 +357,8 @@ def edit_file(
     if start_line < 1 or end_line < 1:
         return json.dumps({"error": "start_line and end_line must be >= 1"})
 
-    result = edit_file_section(file_path, start_line, end_line, new_content)
+    policy = _get_file_policy(ctx)
+    result = edit_file_section(file_path, start_line, end_line, new_content, policy=policy)
 
     # Sync the in-memory converted_code with the edited file
     if result.get("success") and file_path in (ctx.converted_files or []):
@@ -342,11 +388,144 @@ def get_converted_file_info(session_id: str) -> str:
             "size_bytes": len(ctx.converted_code.encode("utf-8")),
         })
 
+    policy = _get_file_policy(ctx)
     info_list = []
     for fp in files:
-        info_list.append(get_file_info(fp))
+        info_list.append(get_file_info(fp, policy=policy))
 
     return json.dumps({"files": info_list}, default=str)
+
+
+@tool
+def list_files(
+    session_id: str,
+    dir_path: str = "",
+    depth: int = 2,
+    pattern: str = "",
+    include_hidden: bool = False,
+) -> str:
+    """List files and directories under the project root."""
+    ctx = get_active_context(session_id)
+    policy = _get_file_policy(ctx, allow_hidden=include_hidden)
+
+    if not dir_path:
+        dir_path = ctx.project_path or os.getcwd()
+
+    result = list_directory(
+        dir_path,
+        policy=policy,
+        max_depth=depth,
+        pattern=pattern or None,
+        include_hidden=include_hidden,
+    )
+    return json.dumps(result, default=str)
+
+
+@tool
+def search_file(
+    session_id: str,
+    file_path: str = "",
+    query: str = "",
+    regex: bool = False,
+    case_sensitive: bool = False,
+    max_results: int = 0,
+) -> str:
+    """Search within a file and return matching lines with line numbers."""
+    ctx = get_active_context(session_id)
+    policy = _get_file_policy(ctx)
+
+    if not file_path:
+        if ctx.converted_files:
+            file_path = ctx.converted_files[0]
+        else:
+            return json.dumps({"error": "No file_path provided and no converted files on context."})
+
+    result = search_in_file(
+        file_path,
+        query,
+        policy=policy,
+        regex=regex,
+        case_sensitive=case_sensitive,
+        max_results=max_results if max_results > 0 else None,
+    )
+    return json.dumps(result, default=str)
+
+
+@tool
+def read_file(
+    session_id: str,
+    file_path: str = "",
+    max_bytes: int = 0,
+) -> str:
+    """Read a file's contents with size limits."""
+    ctx = get_active_context(session_id)
+    policy = _get_file_policy(ctx)
+
+    if not file_path:
+        if ctx.converted_files:
+            file_path = ctx.converted_files[0]
+        else:
+            return json.dumps({"error": "No file_path provided and no converted files on context."})
+
+    result = read_file_content(
+        file_path,
+        policy=policy,
+        max_bytes=max_bytes if max_bytes > 0 else None,
+    )
+    return json.dumps(result, default=str)
+
+
+@tool
+def write_file(
+    session_id: str,
+    file_path: str,
+    content: str,
+    expected_hash: str = "",
+) -> str:
+    """Write a full file's contents (use sparingly)."""
+    ctx = get_active_context(session_id)
+    policy = _get_file_policy(ctx)
+
+    result = write_file_content(
+        file_path,
+        content,
+        policy=policy,
+        expected_hash=expected_hash or None,
+        create_dirs=True,
+    )
+    return json.dumps(result, default=str)
+
+
+@tool
+def edit_file_batch(
+    session_id: str,
+    file_path: str,
+    edits: list[dict[str, Any]],
+    expected_hash: str = "",
+) -> str:
+    """Apply multiple line edits to a file in one call."""
+    ctx = get_active_context(session_id)
+    policy = _get_file_policy(ctx)
+
+    result = apply_edit_operations(
+        file_path,
+        edits,
+        expected_hash=expected_hash or None,
+        policy=policy,
+    )
+    return json.dumps(result, default=str)
+
+
+@tool
+def make_directory(
+    session_id: str,
+    dir_path: str,
+) -> str:
+    """Create a directory under the project root."""
+    ctx = get_active_context(session_id)
+    policy = _get_file_policy(ctx)
+    result = make_directory_fs(dir_path, policy=policy)
+    return json.dumps(result, default=str)
 
 
 # ── Tool registry ──────────────────────────────────────────────
@@ -363,4 +542,10 @@ ALL_TOOLS = [
     view_file,
     edit_file,
     get_converted_file_info,
+    list_files,
+    search_file,
+    read_file,
+    write_file,
+    edit_file_batch,
+    make_directory,
 ]

@@ -8,6 +8,7 @@ import { SidebarInset } from "@/components/ui/sidebar";
 import { SetupWizard } from "@/components/ui/setup-wizard";
 import { AssistantMessage } from "@/components/chat/AssistantMessage";
 import { UserMessage } from "@/components/chat/UserMessage";
+import { CodeBlock } from "@/components/chat/CodeBlock";
 import { Workbench } from "@/components/workbench";
 import type { ChatMessage } from "@/lib/chat-types";
 import { createScopedLogger } from "@/lib/logger";
@@ -338,6 +339,7 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   const isAgentResponse = message.kind === "agent_response";
   const isAgentThinking = message.kind === "agent_thinking" || message.kind === "thinking";
   const isSqlRow = message.kind === "sql_statement" || message.kind === "sql_error";
+  const isToolResult = message.kind === "tool_result";
 
   if (isSqlRow && message.sql) {
     return (
@@ -353,6 +355,58 @@ function ChatBubble({ message }: { message: ChatMessage }) {
           {message.sql.error && <SqlBlockSection title="Error" content={message.sql.error} isError />}
         </div>
       </details>
+    );
+  }
+
+  if (isToolResult) {
+    const parsed = parseToolResultPayload(message.content);
+    const toolName = typeof parsed?.tool === "string" ? parsed.tool : "tool";
+    const summary =
+      typeof parsed?.summary === "string"
+        ? parsed.summary
+        : typeof parsed?.message === "string"
+          ? parsed.message
+          : typeof parsed?.error === "string"
+            ? parsed.error
+            : "";
+    const truncated = parsed?.truncated === true;
+    const success =
+      typeof parsed?.success === "boolean" ? parsed.success : undefined;
+    const prettyPayload = parsed ? JSON.stringify(parsed, null, 2) : message.content;
+
+    return (
+      <div className="flex w-full justify-start">
+        <div className="w-full max-w-[min(46rem,92%)] rounded-[calc(0.75rem-1px)] bg-[#202124] px-4 py-3 text-white/92">
+          <details className="group">
+            <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-white/85">
+              <span className="rounded-full border border-white/15 bg-white/5 px-2 py-0.5 text-[11px] uppercase tracking-wide text-white/70">
+                Tool Result
+              </span>
+              <span className="text-white/90">{toolName}</span>
+              {success === true && (
+                <span className="rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[11px] text-emerald-100">
+                  Success
+                </span>
+              )}
+              {success === false && (
+                <span className="rounded-full border border-red-400/40 bg-red-500/15 px-2 py-0.5 text-[11px] text-red-100">
+                  Failed
+                </span>
+              )}
+            </summary>
+            {(summary || truncated) && (
+              <p className="mt-2 text-xs text-white/70">
+                {summary}
+                {summary && truncated ? " " : ""}
+                {truncated ? "(Preview truncated)" : ""}
+              </p>
+            )}
+            <div className="mt-3 overflow-hidden rounded-lg border border-white/10 bg-black/30">
+              <CodeBlock code={prettyPayload} language="json" disableCopy={false} />
+            </div>
+          </details>
+        </div>
+      </div>
     );
   }
 
@@ -395,6 +449,18 @@ function ChatBubble({ message }: { message: ChatMessage }) {
       {buildPlainMessageBody(message)}
     </div>
   );
+}
+
+function parseToolResultPayload(content: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed && typeof parsed === "object") {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
 }
 
 function SqlBlockSection({

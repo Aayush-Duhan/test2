@@ -47,7 +47,8 @@ export type ChatMessageKind =
   | "run_status"
   | "agent_response"
   | "user_input"
-  | "agent_thinking";
+  | "agent_thinking"
+  | "tool_result";
 
 export type ChatSqlDetails = {
   statement?: string;

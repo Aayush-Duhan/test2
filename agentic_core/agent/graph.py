@@ -47,6 +47,20 @@ from agentic_core.models.context import MigrationContext, MigrationState
 logger = logging.getLogger(__name__)
 
 MAX_AGENT_ITERATIONS = 30
+MAX_TOOL_RESULT_CHARS = 12000
+
+# Only surface detailed tool results for file-oriented tools in the chat UI.
+TOOL_RESULT_DISPLAY = {
+    "view_file",
+    "edit_file",
+    "edit_file_batch",
+    "get_converted_file_info",
+    "list_files",
+    "search_file",
+    "read_file",
+    "write_file",
+    "make_directory",
+}
 
 # ── System prompt ──────────────────────────────────────────────
 
@@ -69,6 +83,7 @@ The session_id is: {session_id}
 | execute_sql | Execute converted SQL on Snowflake |
 | validate_output | Validate the conversion quality |
 | finalize_migration | Generate final report (only after success) |
+| pause | Stop the agent loop (see below) |
 
 ### File Tools (multi-argument)
 
@@ -80,6 +95,12 @@ without rewriting the entire file. Use these for targeted error recovery.
 | get_converted_file_info | session_id | Get metadata (paths, total lines, size) of converted files |
 | view_file | session_id, file_path, start_line, end_line | View a section of a file with line numbers |
 | edit_file | session_id, file_path, start_line, end_line, new_content | Replace a range of lines with new content |
+| edit_file_batch | session_id, file_path, edits | Apply multiple line edits in one call |
+| list_files | session_id, dir_path, depth, pattern, include_hidden | List files/directories under project root |
+| search_file | session_id, file_path, query, regex, case_sensitive, max_results | Search within a file |
+| read_file | session_id, file_path, max_bytes | Read file contents (small files only) |
+| write_file | session_id, file_path, content, expected_hash | Write full file contents (use sparingly) |
+| make_directory | session_id, dir_path | Create a directory under project root |
 
 ## How to Call a Tool
 
@@ -98,6 +119,21 @@ For file tools (with additional arguments):
 ```
 
 Only call ONE tool per response. Include explanation text BEFORE the JSON block.
+
+## How to Pause (Stop the Loop)
+
+Call `pause` when you need to stop. Use it when:
+- The migration is **complete** (status: "completed")
+- You hit an error that **requires user action** — missing schemas, permissions, etc. (status: "blocked")
+- You encounter an **unrecoverable error** after retrying (status: "error")
+
+```json
+{{"action": "pause", "session_id": "{session_id}", "args": {{"reason": "Brief explanation of why you are stopping", "status": "completed|blocked|error"}}}}
+```
+
+**You MUST call pause to stop.** If you respond without any action block, the loop \
+will continue and you will be prompted again. Always call pause when you are done \
+or cannot proceed.
 
 ## How to Send a Final Message (No Tool)
 
@@ -164,7 +200,30 @@ _FENCED_JSON_PATTERN = re.compile(
     re.DOTALL,
 )
 
-VALID_TOOL_NAMES = {t.name for t in ALL_TOOLS}
+VALID_TOOL_NAMES = {t.name for t in ALL_TOOLS} | {"pause"}
+
+
+def _format_tool_result_for_chat(tool_name: str, tool_result: str) -> str:
+    """Prepare a concise JSON payload for chat display."""
+    try:
+        data = json.loads(tool_result)
+    except Exception:
+        data = {"tool": tool_name, "raw": tool_result}
+
+    if isinstance(data, dict) and "tool" not in data:
+        data["tool"] = tool_name
+
+    payload = json.dumps(data, indent=2, ensure_ascii=False, default=str)
+    if len(payload) <= MAX_TOOL_RESULT_CHARS:
+        return payload
+
+    wrapper = {
+        "tool": tool_name,
+        "truncated": True,
+        "total_chars": len(payload),
+        "preview": payload[:MAX_TOOL_RESULT_CHARS],
+    }
+    return json.dumps(wrapper, indent=2, ensure_ascii=False, default=str)
 
 
 def parse_action(response_text: str) -> tuple[str | None, str | None, str, dict]:
@@ -223,7 +282,16 @@ def parse_action(response_text: str) -> tuple[str | None, str | None, str, dict]
 _TOOL_MAP = {t.name: t for t in ALL_TOOLS}
 
 # Tools that accept extra arguments beyond session_id
-_MULTI_ARG_TOOLS = {"view_file", "edit_file"}
+_MULTI_ARG_TOOLS = {
+    "view_file",
+    "edit_file",
+    "edit_file_batch",
+    "list_files",
+    "search_file",
+    "read_file",
+    "write_file",
+    "make_directory",
+}
 
 
 def execute_tool(tool_name: str, session_id: str, extra_args: dict | None = None) -> str:
@@ -394,27 +462,21 @@ def run_agent_loop(
                 else:
                     emit("agent", "agent_response", reasoning)
 
-            # ── No tool call → check if done ───────────────────
-            if tool_name is None:
-                updated_ctx = get_active_context(session_id)
-                if updated_ctx.current_stage == MigrationState.COMPLETED:
-                    log_stopping(session_id, "Migration completed")
-                    break
-                if updated_ctx.requires_ddl_upload:
-                    log_stopping(session_id, "DDL upload required")
-                    break
-                if updated_ctx.current_stage == MigrationState.HUMAN_REVIEW:
-                    log_stopping(session_id, "Human review required")
-                    break
+            # ── Pause → agent wants to stop ─────────────────────
+            if tool_name == "pause":
+                pause_reason = extra_args.get("reason", "Agent paused")
+                pause_status = extra_args.get("status", "blocked")
+                log_stopping(session_id, f"Agent paused ({pause_status}): {pause_reason}")
+                if pause_status == "completed":
+                    emit("system", "run_status", "Migration completed successfully!")
+                elif pause_status == "error":
+                    emit("error", "run_status", f"Agent stopped: {pause_reason}")
+                else:
+                    emit("system", "run_status", f"Agent paused: {pause_reason}")
+                break
 
-                # Agent responded without a tool call — might be answering a user
-                # question. Add a follow-up prompt to continue.
-                if iteration < MAX_AGENT_ITERATIONS:
-                    conversation.append({
-                        "role": "user",
-                        "content": "Continue with the migration. If all steps are complete, say 'Migration complete' without any JSON action block.",
-                    })
-                    sync_conversation(conversation)
+            # ── No tool call → just a message, keep going ──────
+            if tool_name is None:
                 continue
 
             # ── Execute tool ───────────────────────────────────
@@ -437,22 +499,14 @@ def run_agent_loop(
 
             log_tool_result(session_id, tool_name, tool_result, success, summary)
 
+            if tool_name in TOOL_RESULT_DISPLAY:
+                tool_payload = _format_tool_result_for_chat(tool_name, tool_result)
+                emit("agent", "tool_result", tool_payload)
+
             # Add tool result as a user message (maintaining role alternation)
             tool_result_msg = f"Tool `{tool_name}` result:\n```json\n{tool_result}\n```"
             conversation.append({"role": "user", "content": tool_result_msg})
             sync_conversation(conversation)
-
-            # ── Check for completion/stopping conditions ───────
-            updated_ctx = get_active_context(session_id)
-            if updated_ctx.current_stage == MigrationState.COMPLETED:
-                emit("system", "run_status", "Migration completed successfully!")
-                log_stopping(session_id, "Migration completed successfully")
-                break
-            if updated_ctx.requires_ddl_upload:
-                emit("system", "run_status",
-                     "DDL upload required. The agent will resume after you upload the required DDL.")
-                log_stopping(session_id, "DDL upload required")
-                break
 
         return get_active_context(session_id)
 

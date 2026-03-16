@@ -714,7 +714,7 @@ export default function SessionsPage() {
       className="flex h-screen flex-col overflow-hidden bg-[#1a1a1a]"
       style={{ ["--header-h" as string]: "48px" }}
     >
-      <Header />
+      <Header showWorkbenchToggle={!!runId} />
 
       {/* Hidden DDL file input */}
       <input

@@ -242,7 +242,7 @@ def append_chat_message(
     ts: str | None = None,
 ) -> dict[str, Any]:
     timestamp = ts or now_iso()
-    cleaned_content = _sanitize_content(content)
+    cleaned_content = content if kind == "tool_result" else _sanitize_content(content)
     message: dict[str, Any] = {
         "id": str(uuid.uuid4()),
         "ts": timestamp,

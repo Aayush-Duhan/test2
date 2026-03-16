@@ -8,9 +8,15 @@ import unittest
 
 from agentic_core.services.file_tools import (
     apply_edit_operations,
+    FileAccessPolicy,
     edit_file_section,
     get_file_info,
+    list_directory,
+    make_directory,
+    read_file,
+    search_in_file,
     view_file_section,
+    write_file_content,
 )
 
 
@@ -274,6 +280,56 @@ class TestSelfHealEditParsing(unittest.TestCase):
         self.assertIn("COMMENT ON COLUMN", fixed_code)
         # Total lines preserved
         self.assertEqual(len(result_lines), 10)
+
+
+class TestFilePoliciesAndExtras(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.root = os.path.join(self.tmpdir, "root")
+        self.outside = os.path.join(self.tmpdir, "outside")
+        os.makedirs(self.root, exist_ok=True)
+        os.makedirs(self.outside, exist_ok=True)
+        self.filepath = os.path.join(self.root, "sample.sql")
+        with open(self.filepath, "w", encoding="utf-8") as f:
+            f.write("alpha\nbeta\nGamma\n")
+
+        self.policy = FileAccessPolicy(root_paths=[self.root])
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def test_policy_blocks_outside_root(self):
+        outside_file = os.path.join(self.outside, "oops.sql")
+        with open(outside_file, "w", encoding="utf-8") as f:
+            f.write("SELECT 1;\n")
+        result = view_file_section(outside_file, policy=self.policy)
+        self.assertIn("error", result)
+
+    def test_write_file_with_hash_guard(self):
+        info = get_file_info(self.filepath, policy=self.policy, include_hash=True)
+        bad_hash = "0" * 64
+        result = edit_file_section(self.filepath, 1, 1, "REPLACED", expected_hash=bad_hash, policy=self.policy)
+        self.assertFalse(result["success"])
+        self.assertEqual(info["exists"], True)
+
+    def test_list_directory_and_search(self):
+        list_result = list_directory(self.root, policy=self.policy, max_depth=1)
+        self.assertTrue(any(entry["type"] == "file" for entry in list_result.get("entries", [])))
+
+        search_result = search_in_file(self.filepath, "beta", policy=self.policy)
+        self.assertEqual(len(search_result.get("matches", [])), 1)
+
+    def test_read_and_write_file_content(self):
+        read_result = read_file(self.filepath, policy=self.policy)
+        self.assertIn("alpha", read_result.get("content", ""))
+
+        subdir = os.path.join(self.root, "nested")
+        mkdir_result = make_directory(subdir, policy=self.policy)
+        self.assertTrue(mkdir_result["success"])
+
+        new_path = os.path.join(subdir, "new.sql")
+        write_result = write_file_content(new_path, "ONE\\nTWO", policy=self.policy)
+        self.assertTrue(write_result["success"])
 
 
 if __name__ == "__main__":

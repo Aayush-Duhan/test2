@@ -1,65 +1,86 @@
 /**
- * GET /api/fs/read?path=...
- * Reads file content from the local filesystem.
- * Returns: { content: string, isBinary: boolean }
+ * GET /api/fs/read?path=...&maxBytes=...
+ * Reads file content from the local filesystem with guardrails.
+ * Returns: { content, isBinary, truncated, sizeBytes, sha256? }
  */
-import { NextRequest, NextResponse } from 'next/server';
-import { readFile, stat } from 'node:fs/promises';
-import { resolve, normalize } from 'node:path';
+import { NextRequest, NextResponse } from "next/server";
+import { promises as fs } from "node:fs";
+import {
+  MAX_FILE_BYTES,
+  MAX_READ_BYTES,
+  isBinaryBuffer,
+  resolveSafePath,
+  sha256Buffer,
+} from "@/lib/fs-guard";
 
-const PROJECT_ROOT = resolve(process.cwd(), '..', 'data');
-
-function isBinaryContent(buffer: Buffer): boolean {
-  // Check first 8KB for null bytes — a simple binary detection heuristic
-  const checkLength = Math.min(buffer.length, 8192);
-  for (let i = 0; i < checkLength; i++) {
-    if (buffer[i] === 0) {
-      return true;
-    }
-  }
-  return false;
-}
+export const runtime = "nodejs";
 
 export async function GET(request: NextRequest) {
   try {
-    const filePath = request.nextUrl.searchParams.get('path');
+    const filePath = request.nextUrl.searchParams.get("path");
+    const maxBytesParam = request.nextUrl.searchParams.get("maxBytes");
 
     if (!filePath) {
       return NextResponse.json(
-        { error: 'path query parameter is required' },
+        { error: "path query parameter is required" },
         { status: 400 },
       );
     }
 
-    const resolved = resolve(PROJECT_ROOT, normalize(filePath).replace(/^[/\\]+/, ''));
+    const { absPath, stat } = await resolveSafePath(filePath, {
+      mustExist: true,
+      allowDir: false,
+      allowFile: true,
+    });
 
-    // Security: ensure the resolved path is under PROJECT_ROOT
-    if (!resolved.startsWith(PROJECT_ROOT)) {
+    if (!stat?.isFile()) {
+      return NextResponse.json({ error: "Not a file" }, { status: 400 });
+    }
+
+    if (stat.size > MAX_FILE_BYTES) {
       return NextResponse.json(
-        { error: 'Path traversal not allowed' },
-        { status: 403 },
+        { error: "File exceeds max size", sizeBytes: stat.size },
+        { status: 413 },
       );
     }
 
-    // Check file exists
-    const fileStat = await stat(resolved);
-    if (!fileStat.isFile()) {
-      return NextResponse.json(
-        { error: 'Not a file' },
-        { status: 400 },
-      );
+    const requestedMax = maxBytesParam ? Number(maxBytesParam) : undefined;
+    const effectiveMax =
+      requestedMax && Number.isFinite(requestedMax)
+        ? Math.min(Math.max(1, requestedMax), MAX_READ_BYTES)
+        : MAX_READ_BYTES;
+
+    let buffer: Buffer;
+    let truncated = false;
+    let sha256: string | undefined;
+
+    if (effectiveMax >= stat.size) {
+      buffer = await fs.readFile(absPath);
+      sha256 = sha256Buffer(buffer);
+    } else {
+      const handle = await fs.open(absPath, "r");
+      try {
+        buffer = Buffer.alloc(effectiveMax);
+        const { bytesRead } = await handle.read(buffer, 0, effectiveMax, 0);
+        buffer = buffer.subarray(0, bytesRead);
+        truncated = stat.size > bytesRead;
+      } finally {
+        await handle.close();
+      }
     }
 
-    const buffer = await readFile(resolved);
-    const isBinary = isBinaryContent(buffer);
+    const isBinary = isBinaryBuffer(buffer);
 
     return NextResponse.json({
-      content: isBinary ? '' : buffer.toString('utf-8'),
+      content: isBinary ? "" : buffer.toString("utf-8"),
       isBinary,
+      truncated,
+      sizeBytes: stat.size,
+      sha256,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const status = (error as NodeJS.ErrnoException)?.code === 'ENOENT' ? 404 : 500;
+    const status = (error as NodeJS.ErrnoException)?.code === "ENOENT" ? 404 : 500;
     return NextResponse.json({ error: message }, { status });
   }
 }
