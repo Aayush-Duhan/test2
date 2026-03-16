@@ -251,6 +251,10 @@ def run_agent_loop(
     message_callback: Optional[Callable[[str, str, str], None]] = None,
     step_callback: Optional[Callable[[str, str], None]] = None,
     user_message_getter: Optional[Callable[[], Optional[str]]] = None,
+    conversation_history: Optional[list[dict[str, str]]] = None,
+    conversation_callback: Optional[Callable[[list[dict[str, str]]], None]] = None,
+    consume_user_messages_from_start: bool = False,
+    start_with_migration_prompt: bool = True,
 ) -> MigrationContext:
     """Run the autonomous agent loop.
 
@@ -287,6 +291,23 @@ def run_agent_loop(
             except Exception:
                 pass
 
+    def sync_conversation(conversation: list[dict[str, str]]) -> None:
+        if not conversation_callback:
+            return
+
+        try:
+            conversation_callback(
+                [
+                    {
+                        "role": str(message.get("role", "user")),
+                        "content": str(message.get("content", "")),
+                    }
+                    for message in conversation
+                ]
+            )
+        except Exception:
+            pass
+
     # Build system prompt
     system_prompt = SYSTEM_PROMPT.format(
         session_id=session_id,
@@ -295,11 +316,32 @@ def run_agent_loop(
         has_schema_mapping="Yes" if context.mapping_csv_path else "No",
     )
 
-    # Conversation history — only system/user/assistant roles
-    conversation: list[dict[str, str]] = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": "Begin the migration process. Execute the tools in order."},
-    ]
+    if conversation_history:
+        conversation = [
+            {
+                "role": str(message.get("role", "user")),
+                "content": str(message.get("content", "")),
+            }
+            for message in conversation_history
+            if isinstance(message, dict)
+        ]
+
+        if conversation and conversation[0]["role"] == "system":
+            conversation[0]["content"] = system_prompt
+        else:
+            conversation.insert(0, {"role": "system", "content": system_prompt})
+    else:
+        conversation = [{"role": "system", "content": system_prompt}]
+
+        if start_with_migration_prompt:
+            conversation.append(
+                {
+                    "role": "user",
+                    "content": "Begin the migration process. Execute the tools in order.",
+                }
+            )
+
+    sync_conversation(conversation)
 
     try:
         for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
@@ -307,10 +349,9 @@ def run_agent_loop(
             log_iteration_start(session_id, iteration)
 
             # ── Check for user messages ────────────────────────
-            if user_message_getter and iteration > 1:
+            if user_message_getter and (iteration > 1 or consume_user_messages_from_start):
                 user_msg = user_message_getter()
                 if user_msg and user_msg.strip():
-                    emit("user", "user_input", user_msg)
                     log_user_message(session_id, user_msg)
                     # Need to ensure role alternation — if last message is user,
                     # we can't add another user message
@@ -318,6 +359,7 @@ def run_agent_loop(
                         conversation[-1]["content"] += f"\n\nUser message: {user_msg}"
                     else:
                         conversation.append({"role": "user", "content": user_msg})
+                    sync_conversation(conversation)
 
             # ── Call Cortex ────────────────────────────────────
             log_llm_request(session_id, len(conversation))
@@ -339,6 +381,7 @@ def run_agent_loop(
 
             # Add assistant response to conversation
             conversation.append({"role": "assistant", "content": response_text})
+            sync_conversation(conversation)
 
             # ── Parse action ───────────────────────────────────
             tool_name, tool_session_id, reasoning, extra_args = parse_action(response_text)
@@ -371,6 +414,7 @@ def run_agent_loop(
                         "role": "user",
                         "content": "Continue with the migration. If all steps are complete, say 'Migration complete' without any JSON action block.",
                     })
+                    sync_conversation(conversation)
                 continue
 
             # ── Execute tool ───────────────────────────────────
@@ -396,6 +440,7 @@ def run_agent_loop(
             # Add tool result as a user message (maintaining role alternation)
             tool_result_msg = f"Tool `{tool_name}` result:\n```json\n{tool_result}\n```"
             conversation.append({"role": "user", "content": tool_result_msg})
+            sync_conversation(conversation)
 
             # ── Check for completion/stopping conditions ───────
             updated_ctx = get_active_context(session_id)
@@ -430,6 +475,10 @@ def build_agent_graph(
     message_callback: Optional[Callable[[str, str, str], None]] = None,
     step_callback: Optional[Callable[[str, str], None]] = None,
     user_message_getter: Optional[Callable[[], Optional[str]]] = None,
+    conversation_history: Optional[list[dict[str, str]]] = None,
+    conversation_callback: Optional[Callable[[list[dict[str, str]]], None]] = None,
+    consume_user_messages_from_start: bool = False,
+    start_with_migration_prompt: bool = True,
 ) -> dict:
     """Build an 'agent graph' (really just a config dict for run_agent_loop).
 
@@ -441,6 +490,10 @@ def build_agent_graph(
             message_callback=message_callback,
             step_callback=step_callback,
             user_message_getter=user_message_getter,
+            conversation_history=conversation_history,
+            conversation_callback=conversation_callback,
+            consume_user_messages_from_start=consume_user_messages_from_start,
+            start_with_migration_prompt=start_with_migration_prompt,
         ),
         "_context": context,
     }

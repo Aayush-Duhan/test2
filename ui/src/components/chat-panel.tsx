@@ -1,19 +1,20 @@
 "use client";
 
 import * as React from "react";
-import { ChevronRight, ArrowDown } from "lucide-react";
+import { ArrowDown, ChevronRight } from "lucide-react";
 import { PromptBox } from "@/components/ui/chatgpt-prompt-input";
 import AgentPlan, { type Task } from "@/components/ui/agent-plan";
 import { SidebarInset } from "@/components/ui/sidebar";
-import type { ChatMessage } from "@/lib/chat-types";
 import { SetupWizard } from "@/components/ui/setup-wizard";
+import { AssistantMessage } from "@/components/chat/AssistantMessage";
+import { UserMessage } from "@/components/chat/UserMessage";
 import { Workbench } from "@/components/workbench";
-import { workbenchStore, type UploadedFile } from "@/lib/workbench-store";
+import type { ChatMessage } from "@/lib/chat-types";
 import { createScopedLogger } from "@/lib/logger";
+import { workbenchStore, type UploadedFile } from "@/lib/workbench-store";
 import { useSnapScroll } from "@/hooks/useSnapScroll";
-import { Markdown } from "@/components/chat/Markdown";
 
-const logger = createScopedLogger('ChatPanel');
+const logger = createScopedLogger("ChatPanel");
 
 interface ChatPanelProps {
   runId: string | null;
@@ -88,7 +89,10 @@ export function ChatPanel({
       const files: UploadedFile[] = [];
 
       const appendFiles = (payload: unknown) => {
-        if (!payload || typeof payload !== "object") return;
+        if (!payload || typeof payload !== "object") {
+          return;
+        }
+
         const items = (payload as {
           items?: Array<{
             type?: string;
@@ -99,10 +103,15 @@ export function ChatPanel({
           }>;
         }).items;
 
-        if (!Array.isArray(items)) return;
+        if (!Array.isArray(items)) {
+          return;
+        }
 
         for (const item of items) {
-          if (item?.type !== "file" || !item.content || !item.path) continue;
+          if (item?.type !== "file" || !item.content || !item.path) {
+            continue;
+          }
+
           files.push({
             name: item.name ?? item.path,
             content: item.content,
@@ -112,8 +121,13 @@ export function ChatPanel({
         }
       };
 
-      if (sourceRes.ok) appendFiles(await sourceRes.json());
-      if (outputRes.ok) appendFiles(await outputRes.json());
+      if (sourceRes.ok) {
+        appendFiles(await sourceRes.json());
+      }
+
+      if (outputRes.ok) {
+        appendFiles(await outputRes.json());
+      }
 
       if (files.length > 0) {
         workbenchStore.addUploadedFiles(files);
@@ -124,20 +138,20 @@ export function ChatPanel({
   }, []);
 
   React.useEffect(() => {
-    if (!projectId) return;
+    if (!projectId) {
+      return;
+    }
 
-    // Eager initial sync so files appear immediately on mount
     void syncProjectFiles(projectId);
 
-    // Subscribe to the file-watcher SSE stream for instant updates.
-    // The watcher monitors the entire project root so it detects files
-    // even when parent directories are created after it starts.
     const source = new EventSource(`/api/projects/${projectId}/watch`);
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
     source.addEventListener("files:changed", () => {
-      // Debounce rapid bursts (e.g. multi-file writes) into a single sync
-      if (debounceTimer) clearTimeout(debounceTimer);
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+      }
+
       debounceTimer = setTimeout(() => {
         void syncProjectFiles(projectId);
       }, 300);
@@ -145,12 +159,15 @@ export function ChatPanel({
 
     return () => {
       source.close();
-      if (debounceTimer) clearTimeout(debounceTimer);
+
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+      }
     };
   }, [projectId, runId, status, syncProjectFiles]);
 
   const chatMessages = React.useMemo(
-    () => messages.filter((m) => m.kind !== "step_started" && m.kind !== "step_completed" && m.kind !== "terminal_progress"),
+    () => messages.filter((message) => message.kind !== "step_started" && message.kind !== "step_completed" && message.kind !== "terminal_progress"),
     [messages],
   );
 
@@ -159,7 +176,6 @@ export function ChatPanel({
       <SidebarInset className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#1a1a1a]">
         {runId ? (
           <>
-            {/* Agent Plan — compact progress tracker */}
             <div className="shrink-0 p-4 pb-0">
               <AgentPlan tasks={tasks} readOnly />
             </div>
@@ -177,12 +193,7 @@ export function ChatPanel({
               </div>
             )}
 
-            {/* Chat messages area */}
-            <ChatMessageArea
-              messages={chatMessages}
-              error={error}
-              isAgentThinking={isAgentThinking}
-            />
+            <ChatMessageArea messages={chatMessages} error={error} isAgentThinking={isAgentThinking} />
           </>
         ) : isHydratingRun ? (
           <div className="flex flex-1 items-center justify-center">
@@ -267,8 +278,6 @@ function DdlUploadBanner({
   );
 }
 
-/** Merged timeline item — either a chat message or a terminal command block */
-
 function ChatMessageArea({
   messages,
   error,
@@ -279,7 +288,6 @@ function ChatMessageArea({
   isAgentThinking?: boolean;
 }) {
   const [messageRef, scrollRef, isAtBottom, scrollToBottom] = useSnapScroll();
-
   const hasContent = messages.length > 0 || isAgentThinking || error;
 
   return (
@@ -291,18 +299,13 @@ function ChatMessageArea({
           </div>
         ) : (
           <div ref={messageRef} className="space-y-3">
-            {messages.map((m, i) => (
-              <ChatBubble key={`msg-${m.id}-${i}`} message={m} />
+            {messages.map((message, index) => (
+              <ChatBubble key={`msg-${message.id}-${index}`} message={message} />
             ))}
 
             {isAgentThinking && (
-              <div className="flex items-center gap-2 py-1 text-sm text-white/50">
-                <span className="inline-flex gap-1">
-                  <span className="animate-bounce" style={{ animationDelay: '0ms' }}>·</span>
-                  <span className="animate-bounce" style={{ animationDelay: '150ms' }}>·</span>
-                  <span className="animate-bounce" style={{ animationDelay: '300ms' }}>·</span>
-                </span>
-                <span>Agent is working</span>
+              <div className="w-full max-w-[min(46rem,92%)] rounded-[calc(0.75rem-1px)] bg-gradient-to-b from-[#232326] from-30% to-transparent px-4 py-1.5 text-white/72">
+                <span className="animate-pulse">...</span>
               </div>
             )}
 
@@ -315,12 +318,11 @@ function ChatMessageArea({
         )}
       </div>
 
-      {/* Scroll-to-bottom FAB */}
       {!isAtBottom && (
         <button
           type="button"
           onClick={scrollToBottom}
-          className="absolute bottom-3 right-5 flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-[#252525] text-white/70 shadow-lg transition-all hover:bg-[#303030] hover:text-white"
+          className="absolute right-5 bottom-3 flex h-8 w-8 items-center justify-center rounded-full border border-white/15 bg-[#252525] text-white/70 shadow-lg transition-all hover:bg-[#303030] hover:text-white"
           aria-label="Scroll to bottom"
         >
           <ArrowDown className="h-4 w-4" />
@@ -330,58 +332,55 @@ function ChatMessageArea({
   );
 }
 
-function ChatBubble({ message: m }: { message: ChatMessage }) {
-  const isUser = m.role === "user";
-  const isError = m.role === "error";
-  const isAgentResponse = m.kind === "agent_response";
-  const isAgentThinkingMsg = m.kind === "agent_thinking" || m.kind === "thinking";
-  const isSqlRow = m.kind === "sql_statement" || m.kind === "sql_error";
+function ChatBubble({ message }: { message: ChatMessage }) {
+  const isUser = message.role === "user";
+  const isError = message.role === "error";
+  const isAgentResponse = message.kind === "agent_response";
+  const isAgentThinking = message.kind === "agent_thinking" || message.kind === "thinking";
+  const isSqlRow = message.kind === "sql_statement" || message.kind === "sql_error";
 
-  if (isSqlRow && m.sql) {
+  if (isSqlRow && message.sql) {
     return (
       <details className="group">
         <summary className="flex cursor-pointer list-none items-center gap-2 text-sm leading-relaxed text-white/80 hover:text-white/95">
           <ChevronRight className="h-3.5 w-3.5 shrink-0 text-white/40 transition-transform group-open:rotate-90" />
-          <span className={isError ? "text-red-300" : "text-white/80"}>{m.content}</span>
+          <span className={isError ? "text-red-300" : "text-white/80"}>{message.content}</span>
         </summary>
         <div className="ml-5 mt-2 space-y-2 border-l border-white/10 pl-3">
-          {m.sql.statement && <SqlBlockSection title="Query" content={m.sql.statement} />}
-          {m.sql.failedStatement && <SqlBlockSection title="Query" content={m.sql.failedStatement} />}
-          {m.sql.output && <SqlBlockSection title="Output" content={m.sql.output} />}
-          {m.sql.error && <SqlBlockSection title="Error" content={m.sql.error} isError />}
+          {message.sql.statement && <SqlBlockSection title="Query" content={message.sql.statement} />}
+          {message.sql.failedStatement && <SqlBlockSection title="Query" content={message.sql.failedStatement} />}
+          {message.sql.output && <SqlBlockSection title="Output" content={message.sql.output} />}
+          {message.sql.error && <SqlBlockSection title="Error" content={message.sql.error} isError />}
         </div>
       </details>
     );
   }
 
-  if (isAgentThinkingMsg) {
+  if (isAgentThinking || isAgentResponse) {
     return (
-      <div className="flex items-start gap-2 rounded-xl border border-indigo-400/20 bg-indigo-500/5 px-3 py-2 text-sm leading-relaxed text-indigo-200/80">
-        <span className="mt-0.5 inline-flex shrink-0 gap-0.5">
-          <span className="animate-pulse" style={{ animationDelay: '0ms' }}>◆</span>
-        </span>
-        <span className="whitespace-pre-wrap">{m.content}</span>
-      </div>
-    );
-  }
-
-  if (isUser) {
-    return (
-      <div className="flex justify-end">
-        <div className="max-w-[80%] rounded-2xl bg-blue-600/20 border border-blue-400/20 px-4 py-2 text-sm leading-relaxed text-blue-100">
-          <span className="mr-2 text-xs font-semibold uppercase tracking-wider text-blue-300/60">You</span>
-          {m.content}
+      <div className="flex w-full justify-start">
+        <div
+          className={[
+            "w-full max-w-[min(46rem,92%)] rounded-[calc(0.75rem-1px)] px-4 py-1.5 text-white/92",
+            isAgentThinking ? "bg-gradient-to-b from-[#232326] from-30% to-transparent" : "bg-[#232326]",
+          ].join(" ")}
+        >
+          <AssistantMessage content={message.content} />
         </div>
       </div>
     );
   }
 
-  if (isAgentResponse) {
+  if (isUser) {
+    const isMultiline = message.content.includes("\n");
+
     return (
-      <div className="rounded-xl border border-emerald-400/15 bg-emerald-500/5 px-4 py-2.5 text-sm leading-relaxed text-white/90">
-        <span className="mr-2 text-xs font-semibold uppercase tracking-wider text-emerald-400/60">Agent</span>
-        <div className="mt-2 min-w-0">
-          <Markdown>{m.content}</Markdown>
+      <div className="flex justify-end">
+        <div
+          data-multiline={isMultiline ? "" : undefined}
+          className="relative max-w-[min(46rem,92%)] rounded-[22px] bg-white/10 px-4 py-1.5 text-white/95 data-[multiline]:py-3"
+        >
+          <UserMessage content={message.content} />
         </div>
       </div>
     );
@@ -393,7 +392,7 @@ function ChatBubble({ message: m }: { message: ChatMessage }) {
   return (
     <div className={`whitespace-pre-wrap text-sm leading-relaxed ${textClass}`}>
       {prefix && <span className="mr-2 text-xs font-semibold uppercase tracking-wider opacity-50">{prefix}</span>}
-      {buildPlainMessageBody(m)}
+      {buildPlainMessageBody(message)}
     </div>
   );
 }
@@ -411,19 +410,19 @@ function SqlBlockSection({
     <div>
       <div className="mb-1 flex items-center gap-2">
         <span
-          className={`rounded-full border px-2 py-0.5 text-[11px] ${isError
-            ? "border-red-400/40 bg-red-500/15 text-red-100"
-            : "border-white/20 bg-white/10 text-white/80"
-            }`}
+          className={[
+            "rounded-full border px-2 py-0.5 text-[11px]",
+            isError ? "border-red-400/40 bg-red-500/15 text-red-100" : "border-white/20 bg-white/10 text-white/80",
+          ].join(" ")}
         >
           {title}
         </span>
       </div>
       <pre
-        className={`max-h-52 overflow-auto whitespace-pre-wrap rounded-xl border px-3 py-2 text-xs ${isError
-          ? "border-red-400/30 bg-red-500/10 text-red-100"
-          : "border-white/10 bg-black/30 text-white/85"
-          }`}
+        className={[
+          "max-h-52 overflow-auto whitespace-pre-wrap rounded-xl border px-3 py-2 text-xs",
+          isError ? "border-red-400/30 bg-red-500/10 text-red-100" : "border-white/10 bg-black/30 text-white/85",
+        ].join(" ")}
       >
         {content}
       </pre>
@@ -434,10 +433,21 @@ function SqlBlockSection({
 function buildPlainMessageBody(message: ChatMessage): string {
   const chunks: string[] = [message.content];
 
-  if (message.sql?.statement) chunks.push(`SQL:\n${message.sql.statement}`);
-  if (message.sql?.output) chunks.push(`Output:\n${message.sql.output}`);
-  if (message.sql?.error) chunks.push(`Error:\n${message.sql.error}`);
-  if (message.sql?.failedStatement) chunks.push(`Failed SQL:\n${message.sql.failedStatement}`);
+  if (message.sql?.statement) {
+    chunks.push(`SQL:\n${message.sql.statement}`);
+  }
+
+  if (message.sql?.output) {
+    chunks.push(`Output:\n${message.sql.output}`);
+  }
+
+  if (message.sql?.error) {
+    chunks.push(`Error:\n${message.sql.error}`);
+  }
+
+  if (message.sql?.failedStatement) {
+    chunks.push(`Failed SQL:\n${message.sql.failedStatement}`);
+  }
 
   return chunks.filter((chunk) => chunk.trim().length > 0).join("\n\n");
 }

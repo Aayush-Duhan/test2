@@ -46,7 +46,7 @@ def _perf_log(run: RunRecord, message: str) -> None:
         pass
 
 
-def execute_run_sync(run_id: str) -> None:  # noqa: C901
+def execute_run_sync(run_id: str, *, is_follow_up_chat: bool = False) -> None:  # noqa: C901
     """Execute a migration run using the autonomous agent.
 
     This replaces the old rigid pipeline with an LLM-driven agent that
@@ -66,13 +66,14 @@ def execute_run_sync(run_id: str) -> None:  # noqa: C901
 
     try:
         set_run_status(run, "running")
-        append_event(run, "run:started", {"runId": run_id})
-        append_chat_message(
-            run,
-            role="system",
-            kind="run_status",
-            content="Migration started. The agent is analyzing the task...",
-        )
+        if not is_follow_up_chat:
+            append_event(run, "run:started", {"runId": run_id})
+            append_chat_message(
+                run,
+                role="system",
+                kind="run_status",
+                content="Migration started. The agent is analyzing the task...",
+            )
 
         # ── Sink callbacks (identical to the old workflow) ──────
 
@@ -149,25 +150,59 @@ def execute_run_sync(run_id: str) -> None:  # noqa: C901
 
         # ── Build migration context ───────────────────────────
 
-        context = MigrationContext(
-            project_name=run.projectName,
-            source_language=run.sourceLanguage.lower(),
-            source_directory=str(Path(run.sourcePath).resolve().parent),
-            source_files=[run.sourcePath],
-            mapping_csv_path=run.schemaPath,
-            activity_log_sink=activity_log_sink,
-            execution_event_sink=realtime_execution_event_sink,
-            terminal_output_sink=terminal_output_sink,
-            raw_terminal_output_sink=raw_terminal_output_sink,
-            sf_account=run.sfAccount or "",
-            sf_user=run.sfUser or "",
-            sf_role=run.sfRole or "",
-            sf_warehouse=run.sfWarehouse or "",
-            sf_database=run.sfDatabase or "",
-            sf_schema=run.sfSchema or "",
-            sf_authenticator=run.sfAuthenticator or "externalbrowser",
-            session_id=run_id,
-        )
+        if is_follow_up_chat:
+            try:
+                context = get_active_context(run_id)
+            except Exception:
+                context = MigrationContext(
+                    project_name=run.projectName,
+                    source_language=run.sourceLanguage.lower(),
+                    source_directory=str(Path(run.sourcePath).resolve().parent),
+                    source_files=[run.sourcePath],
+                    mapping_csv_path=run.schemaPath,
+                    sf_account=run.sfAccount or "",
+                    sf_user=run.sfUser or "",
+                    sf_role=run.sfRole or "",
+                    sf_warehouse=run.sfWarehouse or "",
+                    sf_database=run.sfDatabase or "",
+                    sf_schema=run.sfSchema or "",
+                    sf_authenticator=run.sfAuthenticator or "externalbrowser",
+                    session_id=run_id,
+                )
+        else:
+            context = MigrationContext(
+                project_name=run.projectName,
+                source_language=run.sourceLanguage.lower(),
+                source_directory=str(Path(run.sourcePath).resolve().parent),
+                source_files=[run.sourcePath],
+                mapping_csv_path=run.schemaPath,
+                sf_account=run.sfAccount or "",
+                sf_user=run.sfUser or "",
+                sf_role=run.sfRole or "",
+                sf_warehouse=run.sfWarehouse or "",
+                sf_database=run.sfDatabase or "",
+                sf_schema=run.sfSchema or "",
+                sf_authenticator=run.sfAuthenticator or "externalbrowser",
+                session_id=run_id,
+            )
+
+        context.project_name = run.projectName
+        context.source_language = run.sourceLanguage.lower()
+        context.source_directory = str(Path(run.sourcePath).resolve().parent)
+        context.source_files = [run.sourcePath]
+        context.mapping_csv_path = run.schemaPath
+        context.activity_log_sink = activity_log_sink
+        context.execution_event_sink = realtime_execution_event_sink
+        context.terminal_output_sink = terminal_output_sink
+        context.raw_terminal_output_sink = raw_terminal_output_sink
+        context.sf_account = run.sfAccount or ""
+        context.sf_user = run.sfUser or ""
+        context.sf_role = run.sfRole or ""
+        context.sf_warehouse = run.sfWarehouse or ""
+        context.sf_database = run.sfDatabase or ""
+        context.sf_schema = run.sfSchema or ""
+        context.sf_authenticator = run.sfAuthenticator or "externalbrowser"
+        context.session_id = run_id
 
         if resume_ddl_path:
             context.requires_ddl_upload = True
@@ -214,6 +249,11 @@ def execute_run_sync(run_id: str) -> None:  # noqa: C901
             ensure_not_canceled(run_id)
             return pop_user_message(run_id)
 
+        def conversation_callback(history: list[dict[str, str]]) -> None:
+            with RUN_LOCK:
+                run.conversationHistory = history
+                persist_runs_locked()
+
         # ── Build and run the agent graph ──────────────────────
 
         _perf_log(run, "AGENT_BUILD_START")
@@ -222,6 +262,10 @@ def execute_run_sync(run_id: str) -> None:  # noqa: C901
             message_callback=message_callback,
             step_callback=step_callback,
             user_message_getter=user_message_getter,
+            conversation_history=list(run.conversationHistory),
+            conversation_callback=conversation_callback,
+            consume_user_messages_from_start=is_follow_up_chat,
+            start_with_migration_prompt=not is_follow_up_chat,
         )
         _perf_log(run, "AGENT_BUILD_END")
 
@@ -241,12 +285,13 @@ def execute_run_sync(run_id: str) -> None:  # noqa: C901
         if final_context.current_stage == MigrationState.COMPLETED:
             set_run_status(run, "completed")
             append_event(run, "run:completed", {"runId": run_id})
-            append_chat_message(
-                run,
-                role="system",
-                kind="run_status",
-                content="Migration completed successfully!",
-            )
+            if not is_follow_up_chat:
+                append_chat_message(
+                    run,
+                    role="system",
+                    kind="run_status",
+                    content="Migration completed successfully!",
+                )
             return
 
         if final_context.requires_ddl_upload:

@@ -106,9 +106,18 @@ def _start_run_record(
         CANCEL_FLAGS[run_id] = threading.Event()
         persist_runs_locked()
 
-    worker = threading.Thread(target=execute_run_sync, args=(run_id,), daemon=True)
-    worker.start()
+    _start_run_worker(run_id)
     return StartRunResponse(runId=run_id)
+
+
+def _start_run_worker(run_id: str, *, is_follow_up_chat: bool = False) -> None:
+    worker = threading.Thread(
+        target=execute_run_sync,
+        args=(run_id,),
+        kwargs={"is_follow_up_chat": is_follow_up_chat},
+        daemon=True,
+    )
+    worker.start()
 
 
 # ── Route registration ─────────────────────────────────────────
@@ -201,17 +210,28 @@ def register_routes(app) -> None:
         body: dict[str, str],
         x_execution_token: str | None = Header(default=None),
     ) -> dict[str, str]:
-        """Send a user message to the running agent."""
+        """Send a user message to the active or completed agent session."""
         require_auth(x_execution_token)
         message = (body.get("message") or "").strip()
         if not message:
             raise HTTPException(status_code=400, detail="Message is required")
 
+        start_follow_up_worker = False
+
         with RUN_LOCK:
             run = RUNS.get(run_id)
             if not run:
                 raise HTTPException(status_code=404, detail="Run not found")
-            if run.status not in ("running", "queued"):
+            if run.status in ("running", "queued"):
+                pass
+            elif run.status == "completed":
+                run.status = "queued"
+                run.error = None
+                run.updatedAt = now_iso()
+                PROJECT_LOCKS[run.projectId] = run_id
+                persist_runs_locked(force=True)
+                start_follow_up_worker = True
+            else:
                 raise HTTPException(
                     status_code=409,
                     detail=f"Run is not active (status: {run.status})",
@@ -220,6 +240,10 @@ def register_routes(app) -> None:
         # Emit user message to chat and push to agent queue
         append_chat_message(run, role="user", kind="user_input", content=message)
         push_user_message(run_id, message)
+
+        if start_follow_up_worker:
+            _start_run_worker(run_id, is_follow_up_chat=True)
+
         return {"status": "queued"}
 
     @app.post("/v1/runs/{run_id}/retry", response_model=StartRunResponse)

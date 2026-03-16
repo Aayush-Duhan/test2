@@ -18,7 +18,6 @@ import {
 import {
   isActive,
   makeMessage,
-  makeThinkingMessage,
   mergeSteps,
   buildTasks,
   flattenExecutionLog,
@@ -609,7 +608,7 @@ export default function SessionsPage() {
       if (!isChatMessage(payload)) return;
       chatSchemaReadyRef.current = true;
 
-      setMessages((prev) => [...prev, payload]);
+      setMessages((prev) => (prev.some((message) => message.id === payload.id) ? prev : [...prev, payload]));
       if (payload.kind === "thinking") {
         setIsAgentThinking(true);
       }
@@ -752,13 +751,24 @@ export default function SessionsPage() {
             onPickDdlFile={() => ddlFileInputRef.current?.click()}
             onSendAgentMessage={runId ? async (message: string) => {
               try {
-                await fetch(`/api/runs/${runId}/chat`, {
+                const response = await fetch(`/api/runs/${runId}/chat`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ message }),
                 });
+
+                if (!response.ok) {
+                  const payload = await response.json().catch(() => ({}));
+                  setError(typeof payload?.detail === "string" ? payload.detail : "Unable to send message");
+                  return;
+                }
+
+                setError(null);
+                setStatus("queued");
+                setIsAgentThinking(true);
+                await reconcileRunSnapshot(runId);
               } catch {
-                // message delivery is best-effort; SSE stream will show agent response
+                setError("Unable to send message");
               }
             } : undefined}
           />
