@@ -1,8 +1,9 @@
 "use client";
 
 import * as React from "react";
-import { ChevronLeft, ChevronRight, Check, Database, FileText, GitBranch, CheckCircle2, Code2, KeyRound, Github } from "lucide-react";
+import { ChevronLeft, ChevronRight, Check, Database, FileText, GitBranch, CheckCircle2, Code2, KeyRound, Github, FolderOpen } from "lucide-react";
 import { GitHubImportModal } from "@/components/ui/github-import-modal";
+import { resetGitHubImport } from "@/lib/github-import-store";
 import {
   useWizardState,
   getVisibleWizardSteps,
@@ -14,6 +15,7 @@ import {
   goToNextStep,
   goToPreviousStep,
   setSourceLanguage,
+  setImportSource,
   toggleScriptType,
   addSourceFiles,
   removeSourceFile,
@@ -36,6 +38,7 @@ function cn(...inputs: (string | boolean | undefined | null)[]): string {
 const STEP_ICONS: Record<WizardStepId, React.ElementType> = {
   language: Database,
   scriptType: Code2,
+  importSource: FolderOpen,
   files: FileText,
   mapping: GitBranch,
   credentials: KeyRound,
@@ -128,11 +131,71 @@ const ScriptTypeStep = React.memo(function ScriptTypeStep() {
   );
 });
 
+// Step 3: Import Source Selection
+const ImportSourceStep = React.memo(function ImportSourceStep() {
+  const { importSource } = useWizardState();
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h3 className="text-lg font-semibold text-white mb-2">Choose Import Source</h3>
+        <p className="text-sm text-[#8a8a8f] mb-4">
+          Select where your migration files will come from.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <button
+          type="button"
+          onClick={() => {
+            resetGitHubImport();
+            setImportSource("system");
+          }}
+          className={cn(
+            "p-4 rounded-lg border text-left transition-all duration-200",
+            importSource === "system"
+              ? "border-[#4da5fc] bg-[#4da5fc]/10 text-white"
+              : "border-[#333] bg-[#1a1a1a] text-[#8a8a8f] hover:border-[#444] hover:text-white"
+          )}
+        >
+          <p className="text-sm font-medium">Import from System</p>
+          <p className="mt-1 text-xs text-[#777]">
+            Upload files from your local machine.
+          </p>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            resetGitHubImport();
+            setImportSource("github");
+          }}
+          className={cn(
+            "p-4 rounded-lg border text-left transition-all duration-200",
+            importSource === "github"
+              ? "border-[#4da5fc] bg-[#4da5fc]/10 text-white"
+              : "border-[#333] bg-[#1a1a1a] text-[#8a8a8f] hover:border-[#444] hover:text-white"
+          )}
+        >
+          <div className="flex items-center gap-2">
+            <Github className="h-4 w-4" />
+            <p className="text-sm font-medium">Import from GitHub</p>
+          </div>
+          <p className="mt-1 text-xs text-[#777]">
+            Select files from a GitHub Enterprise repository.
+          </p>
+        </button>
+      </div>
+    </div>
+  );
+});
+
 // Step 3: File Selection
 const FilesStep = React.memo(function FilesStep() {
-  const { sourceFiles } = useWizardState();
+  const { sourceFiles, importSource } = useWizardState();
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const [repoModalOpen, setRepoModalOpen] = React.useState(false);
+  const usingGitHub = importSource === "github";
 
   const handleFileUpload = React.useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
@@ -179,54 +242,59 @@ const FilesStep = React.memo(function FilesStep() {
   return (
     <div className="space-y-6">
       <div>
-        <h3 className="text-lg font-semibold text-white mb-2">Upload Source Files</h3>
+        <h3 className="text-lg font-semibold text-white mb-2">Source Files</h3>
         <p className="text-sm text-[#8a8a8f] mb-4">
-          Upload your SQL scripts, DDL files, or stored procedures to migrate.
+          {usingGitHub
+            ? "Select the source SQL files from GitHub."
+            : "Upload your SQL scripts, DDL files, or stored procedures to migrate."}
         </p>
       </div>
 
-      {/* Drop zone */}
-      <div
-        onDrop={handleDrop}
-        onDragOver={(e) => e.preventDefault()}
-        onClick={() => fileInputRef.current?.click()}
-        className="border-2 border-dashed border-[#333] rounded-lg p-8 text-center hover:border-[#4da5fc] transition-colors cursor-pointer"
-      >
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          accept=".sql,.ddl,.btq,.txt"
-          onChange={handleFileUpload}
-          className="hidden"
-        />
-        <FileText className="w-12 h-12 mx-auto mb-4 text-[#4da5fc]" />
-        <p className="text-white font-medium mb-1">Drop files here or click to browse</p>
-        <p className="text-sm text-[#8a8a8f]">.sql, .ddl, .btq, .txt files supported</p>
-      </div>
+      {!usingGitHub && (
+        <>
+          {/* Drop zone */}
+          <div
+            onDrop={handleDrop}
+            onDragOver={(e) => e.preventDefault()}
+            onClick={() => fileInputRef.current?.click()}
+            className="border-2 border-dashed border-[#333] rounded-lg p-8 text-center hover:border-[#4da5fc] transition-colors cursor-pointer"
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".sql,.ddl,.btq,.txt"
+              onChange={handleFileUpload}
+              className="hidden"
+            />
+            <FileText className="w-12 h-12 mx-auto mb-4 text-[#4da5fc]" />
+            <p className="text-white font-medium mb-1">Drop files here or click to browse</p>
+            <p className="text-sm text-[#8a8a8f]">.sql, .ddl, .btq, .txt files supported</p>
+          </div>
+        </>
+      )}
 
-      {/* Import from GitHub Enterprise */}
-      <div className="flex items-center gap-3">
-        <div className="h-px flex-1 bg-[#333]" />
-        <span className="text-xs text-[#666]">or</span>
-        <div className="h-px flex-1 bg-[#333]" />
-      </div>
+      {usingGitHub && (
+        <>
+          <button
+            type="button"
+            onClick={() => setRepoModalOpen(true)}
+            className="flex w-full items-center justify-center gap-2.5 rounded-lg border border-[#333] bg-[#1a1a1a] px-4 py-3 text-sm font-medium text-[#ccc] transition-all hover:border-[#4da5fc] hover:text-white hover:bg-[#4da5fc]/5"
+          >
+            <Github className="h-5 w-5" />
+            Select from GitHub Enterprise
+          </button>
 
-      <button
-        type="button"
-        onClick={() => setRepoModalOpen(true)}
-        className="flex w-full items-center justify-center gap-2.5 rounded-lg border border-[#333] bg-[#1a1a1a] px-4 py-3 text-sm font-medium text-[#ccc] transition-all hover:border-[#4da5fc] hover:text-white hover:bg-[#4da5fc]/5"
-      >
-        <Github className="h-5 w-5" />
-        Import from GitHub Enterprise
-      </button>
-
-      <GitHubImportModal
-        mode="source"
-        open={repoModalOpen}
-        onOpenChange={setRepoModalOpen}
-        onImport={handleRepositoryImport}
-      />
+          <GitHubImportModal
+            mode="source"
+            open={repoModalOpen}
+            onOpenChange={setRepoModalOpen}
+            onImport={handleRepositoryImport}
+            resetOnOpen={false}
+            clearSelectionOnImport
+          />
+        </>
+      )}
 
       {/* File list */}
       {sourceFiles.length > 0 && (
@@ -261,9 +329,10 @@ const FilesStep = React.memo(function FilesStep() {
 
 // Step 4: Schema Mapping
 const MappingStep = React.memo(function MappingStep() {
-  const { mappingFiles } = useWizardState();
+  const { mappingFiles, importSource } = useWizardState();
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const [repoModalOpen, setRepoModalOpen] = React.useState(false);
+  const usingGitHub = importSource === "github";
 
   const handleFileUpload = React.useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
@@ -312,52 +381,57 @@ const MappingStep = React.memo(function MappingStep() {
       <div>
         <h3 className="text-lg font-semibold text-white mb-2">Schema Mapping (Optional)</h3>
         <p className="text-sm text-[#8a8a8f] mb-4">
-          Upload CSV files containing table and column name mappings for your migration.
+          {usingGitHub
+            ? "Select CSV/JSON mapping files from the same GitHub repository."
+            : "Upload CSV files containing table and column name mappings for your migration."}
         </p>
       </div>
 
-      {/* Drop zone */}
-      <div
-        onDrop={handleDrop}
-        onDragOver={(e) => e.preventDefault()}
-        onClick={() => fileInputRef.current?.click()}
-        className="border-2 border-dashed border-[#333] rounded-lg p-8 text-center hover:border-[#4da5fc] transition-colors cursor-pointer"
-      >
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          accept=".csv,.json"
-          onChange={handleFileUpload}
-          className="hidden"
-        />
-        <GitBranch className="w-12 h-12 mx-auto mb-4 text-[#4da5fc]" />
-        <p className="text-white font-medium mb-1">Drop CSV/JSON files here or click to browse</p>
-        <p className="text-sm text-[#8a8a8f]">.csv, .json mapping files supported</p>
-      </div>
+      {!usingGitHub && (
+        <>
+          {/* Drop zone */}
+          <div
+            onDrop={handleDrop}
+            onDragOver={(e) => e.preventDefault()}
+            onClick={() => fileInputRef.current?.click()}
+            className="border-2 border-dashed border-[#333] rounded-lg p-8 text-center hover:border-[#4da5fc] transition-colors cursor-pointer"
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".csv,.json"
+              onChange={handleFileUpload}
+              className="hidden"
+            />
+            <GitBranch className="w-12 h-12 mx-auto mb-4 text-[#4da5fc]" />
+            <p className="text-white font-medium mb-1">Drop CSV/JSON files here or click to browse</p>
+            <p className="text-sm text-[#8a8a8f]">.csv, .json mapping files supported</p>
+          </div>
+        </>
+      )}
 
-      {/* Import from GitHub Enterprise */}
-      <div className="flex items-center gap-3">
-        <div className="h-px flex-1 bg-[#333]" />
-        <span className="text-xs text-[#666]">or</span>
-        <div className="h-px flex-1 bg-[#333]" />
-      </div>
+      {usingGitHub && (
+        <>
+          <button
+            type="button"
+            onClick={() => setRepoModalOpen(true)}
+            className="flex w-full items-center justify-center gap-2.5 rounded-lg border border-[#333] bg-[#1a1a1a] px-4 py-3 text-sm font-medium text-[#ccc] transition-all hover:border-[#4da5fc] hover:text-white hover:bg-[#4da5fc]/5"
+          >
+            <Github className="h-5 w-5" />
+            Select mapping files from GitHub
+          </button>
 
-      <button
-        type="button"
-        onClick={() => setRepoModalOpen(true)}
-        className="flex w-full items-center justify-center gap-2.5 rounded-lg border border-[#333] bg-[#1a1a1a] px-4 py-3 text-sm font-medium text-[#ccc] transition-all hover:border-[#4da5fc] hover:text-white hover:bg-[#4da5fc]/5"
-      >
-        <Github className="h-5 w-5" />
-        Import from GitHub Enterprise
-      </button>
-
-      <GitHubImportModal
-        mode="mapping"
-        open={repoModalOpen}
-        onOpenChange={setRepoModalOpen}
-        onImport={handleRepositoryImport}
-      />
+          <GitHubImportModal
+            mode="mapping"
+            open={repoModalOpen}
+            onOpenChange={setRepoModalOpen}
+            onImport={handleRepositoryImport}
+            resetOnOpen={false}
+            clearSelectionOnImport
+          />
+        </>
+      )}
 
       {/* File list */}
       {mappingFiles.length > 0 && (
@@ -563,6 +637,8 @@ const StepContent = React.memo(function StepContent({ step }: { step: WizardStep
       return <LanguageStep />;
     case "scriptType":
       return <ScriptTypeStep />;
+    case "importSource":
+      return <ImportSourceStep />;
     case "files":
       return <FilesStep />;
     case "mapping":
@@ -592,8 +668,10 @@ export const SetupWizard = React.memo(function SetupWizard({ onStartMigration, i
 
   React.useEffect(() => {
     resetWizard();
+    resetGitHubImport();
     return () => {
       resetWizard();
+      resetGitHubImport();
     };
   }, []);
 

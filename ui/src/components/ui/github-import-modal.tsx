@@ -26,19 +26,19 @@ import {
   useGitHubImportState,
   setOrg,
   setToken,
-  setBranch,
+  setRepositoryName,
   setSearchQuery,
   toggleFile,
   selectAllVisible,
   deselectAllVisible,
-  fetchRepositories,
-  selectRepository,
-  fetchTree,
+  loadRepository,
+  changeBranchAndReload,
   fetchSelectedFiles,
   resetGitHubImport,
   dismissWarning,
   dismissSso,
   clearStoredCredentials,
+  clearGitHubSelection,
   getFilteredTree,
   type RepoFetchedFile,
 } from "@/lib/github-import-store";
@@ -51,6 +51,8 @@ interface GitHubImportModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onImport: (files: WizardFile[]) => void;
+  resetOnOpen?: boolean;
+  clearSelectionOnImport?: boolean;
 }
 
 export function GitHubImportModal({
@@ -58,14 +60,16 @@ export function GitHubImportModal({
   open,
   onOpenChange,
   onImport,
+  resetOnOpen = true,
+  clearSelectionOnImport = false,
 }: GitHubImportModalProps) {
   const importState = useGitHubImportState();
   const [showToken, setShowToken] = React.useState(false);
 
-  const extensionFilter = React.useMemo(
-    () => (mode === "source" ? undefined : ["csv", "json"]),
-    [mode]
-  );
+  const extensionFilter = React.useMemo(() => {
+    if (mode === "mapping") return ["csv", "json"];
+    return ["sql", "ddl", "btq", "txt"];
+  }, [mode]);
 
   const filteredTree = getFilteredTree(extensionFilter);
 
@@ -79,17 +83,13 @@ export function GitHubImportModal({
     visiblePaths.every((path) => importState.selectedPaths.has(path));
 
   React.useEffect(() => {
-    if (open) {
+    if (open && resetOnOpen) {
       resetGitHubImport();
     }
-  }, [open]);
-
-  const handleConnect = async () => {
-    await fetchRepositories();
-  };
+  }, [open, resetOnOpen]);
 
   const handleLoadRepository = async () => {
-    await fetchTree();
+    await loadRepository();
   };
 
   const handleImport = async () => {
@@ -106,6 +106,11 @@ export function GitHubImportModal({
     }));
 
     onImport(wizardFiles);
+
+    if (clearSelectionOnImport) {
+      const hasErrors = !!result.errors && result.errors.length > 0;
+      clearGitHubSelection({ clearWarning: !hasErrors });
+    }
 
     if (!result.errors || result.errors.length === 0) {
       onOpenChange(false);
@@ -130,10 +135,10 @@ export function GitHubImportModal({
       : "Select schema mapping files from GitHub Enterprise";
 
   const hasTree = importState.tree.length > 0;
-  const hasRepositories = importState.repositories.length > 0;
-  const isConnected = hasRepositories;
-  const showBranchSelector =
-    importState.isLoadingBranches || importState.availableBranches.length > 0;
+  const hasCredentials = Boolean(importState.token.trim() && importState.org.trim());
+  const hasRepository = Boolean(importState.selectedRepositoryName.trim());
+  const showBranchSelector = hasTree && importState.availableBranches.length > 0;
+  const isLoading = importState.isLoadingBranches || importState.isLoadingTree;
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -149,7 +154,7 @@ export function GitHubImportModal({
               <span className="text-xs text-neutral-400">{subtitle}</span>
             </div>
             <div className="flex items-center gap-2">
-              {isConnected && (
+              {hasCredentials && (
                 <button
                   type="button"
                   onClick={handleDisconnect}
@@ -180,7 +185,7 @@ export function GitHubImportModal({
                       value={importState.token}
                       onChange={(event) => setToken(event.target.value)}
                       placeholder="ghp_xxxxxxxxxxxx"
-                      disabled={isConnected}
+                      disabled={hasTree}
                       className="w-full rounded border border-neutral-700 bg-transparent py-2 pl-9 pr-10 text-sm text-neutral-100 placeholder-neutral-500 outline-none transition-colors focus:border-neutral-500 disabled:opacity-50"
                     />
                     <button
@@ -218,50 +223,25 @@ export function GitHubImportModal({
                       value={importState.org}
                       onChange={(event) => setOrg(event.target.value)}
                       placeholder="my-enterprise-org"
-                      disabled={isConnected}
+                      disabled={hasTree}
                       className="w-full rounded border border-neutral-700 bg-transparent py-2 pl-9 pr-3 text-sm text-neutral-100 placeholder-neutral-500 outline-none transition-colors focus:border-neutral-500 disabled:opacity-50"
                       onKeyDown={(event) => {
-                        if (event.key === "Enter" && importState.token.trim() && importState.org.trim() && !isConnected) {
-                          void handleConnect();
+                        if (event.key === "Enter" && hasCredentials && hasRepository && !hasTree) {
+                          void handleLoadRepository();
                         }
                       }}
                     />
                   </div>
                 </div>
 
-                {/* Connect button */}
-                {!isConnected && (
-                  <button
-                    type="button"
-                    onClick={() => void handleConnect()}
-                    disabled={
-                      !importState.token.trim() ||
-                      !importState.org.trim() ||
-                      importState.isLoadingRepos
-                    }
-                    className="flex w-full items-center justify-center gap-2 rounded border border-neutral-700 bg-neutral-800 px-4 py-2.5 text-sm font-medium text-neutral-100 transition-colors hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    {importState.isLoadingRepos ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <ArrowRight className="h-4 w-4" />
-                    )}
-                    {importState.isLoadingRepos ? "Connecting..." : "Connect"}
-                  </button>
-                )}
-
                 {/* Connected summary */}
-                {isConnected && (
+                {hasTree && (
                   <div className="rounded border border-neutral-800 bg-neutral-900/70 px-3 py-2.5">
-                    <p className="text-[11px] uppercase tracking-wider text-neutral-500">
-                      Connected
+                    <p className="text-[11px] uppercase tracking-wider text-emerald-500">
+                      ● Connected
                     </p>
                     <p className="mt-1 text-sm text-neutral-100">
-                      {importState.org}
-                    </p>
-                    <p className="mt-1 text-xs text-neutral-500">
-                      {importState.repositories.length} repos available
-                      {importState.hasMore ? " (showing first 100)" : ""}
+                      {importState.org}/{importState.selectedRepositoryName}
                     </p>
                   </div>
                 )}
@@ -300,37 +280,29 @@ export function GitHubImportModal({
                 )}
 
                 {/* Repository selector */}
-                {hasRepositories && (
-                  <div className="space-y-2">
-                    <label className="block text-xs font-medium uppercase tracking-wider text-neutral-400">
-                      Repository
-                    </label>
-                    <div className="relative">
-                      <FolderGit2 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
-                      <select
+                <div className="space-y-2">
+                  <label className="block text-xs font-medium uppercase tracking-wider text-neutral-400">
+                    Repository
+                  </label>
+                  <div className="relative">
+                    <FolderGit2 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+                      <input
+                        type="text"
                         value={importState.selectedRepositoryName}
-                        onChange={(event) => void selectRepository(event.target.value)}
-                        className="w-full appearance-none rounded border border-neutral-700 bg-transparent py-2 pl-9 pr-10 text-sm text-neutral-100 outline-none transition-colors focus:border-neutral-500"
-                      >
-                        <option value="" className="bg-neutral-900 text-neutral-400">
-                          Select a repository
-                        </option>
-                        {importState.repositories.map((repository) => (
-                          <option
-                            key={repository.name}
-                            value={repository.name}
-                            className="bg-neutral-900 text-neutral-100"
-                          >
-                            {repository.name}
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
-                    </div>
+                        onChange={(event) => setRepositoryName(event.target.value)}
+                        placeholder="my-repository"
+                        disabled={hasTree}
+                        className="w-full rounded border border-neutral-700 bg-transparent py-2 pl-9 pr-3 text-sm text-neutral-100 outline-none transition-colors focus:border-neutral-500 disabled:opacity-50"
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" && hasCredentials && importState.selectedRepositoryName.trim() && !hasTree) {
+                            void handleLoadRepository();
+                          }
+                      }}
+                    />
                   </div>
-                )}
+                </div>
 
-                {/* Branch selector */}
+                {/* Branch selector — shown after tree is loaded */}
                 {showBranchSelector && (
                   <div className="space-y-2">
                     <label className="block text-xs font-medium uppercase tracking-wider text-neutral-400">
@@ -340,52 +312,44 @@ export function GitHubImportModal({
                       <GitBranch className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
                       <select
                         value={importState.branch}
-                        onChange={(event) => setBranch(event.target.value)}
-                        disabled={
-                          importState.isLoadingBranches ||
-                          importState.availableBranches.length === 0
-                        }
+                        onChange={(event) => void changeBranchAndReload(event.target.value)}
+                        disabled={importState.isLoadingTree}
                         className="w-full appearance-none rounded border border-neutral-700 bg-transparent py-2 pl-9 pr-10 text-sm text-neutral-100 outline-none transition-colors focus:border-neutral-500 disabled:cursor-not-allowed disabled:opacity-50"
                       >
-                        {importState.isLoadingBranches ? (
-                          <option value="" className="bg-neutral-900 text-neutral-100">
-                            Loading branches...
+                        {importState.availableBranches.map((branch) => (
+                          <option
+                            key={branch.name}
+                            value={branch.name}
+                            className="bg-neutral-900 text-neutral-100"
+                          >
+                            {branch.name}
+                            {branch.isDefault ? " (default)" : ""}
                           </option>
-                        ) : (
-                          importState.availableBranches.map((branch) => (
-                            <option
-                              key={branch.name}
-                              value={branch.name}
-                              className="bg-neutral-900 text-neutral-100"
-                            >
-                              {branch.name}
-                              {branch.isDefault ? " (default)" : ""}
-                            </option>
-                          ))
-                        )}
+                        ))}
                       </select>
                       <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
                     </div>
                   </div>
                 )}
 
-                {/* Load repository button */}
-                {isConnected && (
+                {/* Load repository button — single action */}
+                {!hasTree && (
                   <button
                     type="button"
                     onClick={() => void handleLoadRepository()}
                     disabled={
-                      !importState.selectedRepositoryName ||
-                      importState.isLoadingTree
+                      !hasCredentials ||
+                      !hasRepository ||
+                      isLoading
                     }
                     className="flex w-full items-center justify-center gap-2 rounded border border-neutral-700 bg-neutral-800 px-4 py-2.5 text-sm font-medium text-neutral-100 transition-colors hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-40"
                   >
-                    {importState.isLoadingTree ? (
+                    {isLoading ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
                     ) : (
                       <ArrowRight className="h-4 w-4" />
                     )}
-                    {importState.isLoadingTree ? "Loading..." : "Load repository"}
+                    {isLoading ? "Loading..." : "Load Repository"}
                   </button>
                 )}
 
@@ -482,11 +446,11 @@ export function GitHubImportModal({
                   <div className="space-y-2 text-center">
                     <Github className="mx-auto h-8 w-8 text-neutral-600" />
                     <p className="text-sm text-neutral-400">
-                      {isConnected
-                        ? hasRepositories
-                          ? "Select a repo, choose a branch if needed, and load it to browse files."
-                          : "This organization does not have accessible repositories."
-                        : "Enter your PAT and organization name to connect to GitHub Enterprise."}
+                      {hasCredentials
+                        ? hasRepository
+                          ? "Load the repository to browse files."
+                          : "Enter a repository name to browse files."
+                        : "Enter your PAT, organization, and repository name to connect to GitHub Enterprise."}
                     </p>
                   </div>
                 </div>

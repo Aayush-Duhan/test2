@@ -12,12 +12,6 @@ export interface RepoFetchedFile {
   size: number;
 }
 
-export interface GitHubRepositoryOption {
-  id?: number | null;
-  name: string;
-  visibility?: string | null;
-}
-
 export interface GitHubBranchOption {
   name: string;
   isDefault: boolean;
@@ -26,8 +20,8 @@ export interface GitHubBranchOption {
 export interface GitHubImportState {
   token: string;
   org: string;
-  repositories: GitHubRepositoryOption[];
   selectedRepositoryName: string;
+  isConnected: boolean;
   availableBranches: GitHubBranchOption[];
   branch: string;
   tree: RepoTreeEntry[];
@@ -36,7 +30,6 @@ export interface GitHubImportState {
   selectedPaths: Set<string>;
   fetchedFiles: RepoFetchedFile[];
   isValidatingToken: boolean;
-  isLoadingRepos: boolean;
   isLoadingBranches: boolean;
   isLoadingTree: boolean;
   isLoadingFiles: boolean;
@@ -44,7 +37,6 @@ export interface GitHubImportState {
   warning: string | null;
   ssoUrl: string | null;
   searchQuery: string;
-  hasMore: boolean;
 }
 
 interface FetchFilesResult {
@@ -99,8 +91,8 @@ function createInitialState(): GitHubImportState {
   return {
     token: "",
     org: "",
-    repositories: [],
     selectedRepositoryName: "",
+    isConnected: false,
     availableBranches: [],
     branch: "",
     tree: [],
@@ -109,7 +101,6 @@ function createInitialState(): GitHubImportState {
     selectedPaths: new Set(),
     fetchedFiles: [],
     isValidatingToken: false,
-    isLoadingRepos: false,
     isLoadingBranches: false,
     isLoadingTree: false,
     isLoadingFiles: false,
@@ -117,7 +108,6 @@ function createInitialState(): GitHubImportState {
     warning: null,
     ssoUrl: null,
     searchQuery: "",
-    hasMore: false,
   };
 }
 
@@ -157,6 +147,14 @@ export function setToken(token: string) {
     token,
     error: null,
     ssoUrl: null,
+    isConnected: false,
+    availableBranches: [],
+    branch: "",
+    defaultBranch: "",
+    tree: [],
+    truncated: false,
+    selectedPaths: new Set(),
+    fetchedFiles: [],
   };
   persistToken(token);
   notify();
@@ -168,8 +166,35 @@ export function setOrg(org: string) {
     org,
     error: null,
     ssoUrl: null,
+    isConnected: false,
+    availableBranches: [],
+    branch: "",
+    defaultBranch: "",
+    tree: [],
+    truncated: false,
+    selectedPaths: new Set(),
+    fetchedFiles: [],
   };
   persistOrg(org);
+  notify();
+}
+
+export function setRepositoryName(repositoryName: string) {
+  state = {
+    ...state,
+    selectedRepositoryName: repositoryName,
+    isConnected: false,
+    availableBranches: [],
+    branch: "",
+    defaultBranch: "",
+    tree: [],
+    truncated: false,
+    selectedPaths: new Set(),
+    fetchedFiles: [],
+    error: null,
+    warning: null,
+    ssoUrl: null,
+  };
   notify();
 }
 
@@ -227,12 +252,35 @@ export function clearStoredCredentials() {
   notify();
 }
 
+export function clearGitHubSelection(options?: {
+  resetSearch?: boolean;
+  clearWarning?: boolean;
+  clearError?: boolean;
+}) {
+  const resetSearch = options?.resetSearch ?? true;
+  const clearWarning = options?.clearWarning ?? true;
+  const clearError = options?.clearError ?? true;
+  state = {
+    ...state,
+    selectedPaths: new Set(),
+    fetchedFiles: [],
+    ...(clearWarning ? { warning: null } : {}),
+    ...(clearError ? { error: null } : {}),
+    ...(resetSearch ? { searchQuery: "" } : {}),
+  };
+  notify();
+}
+
 async function fetchBranchesForRepository(repositoryName: string) {
-  if (!state.token || !state.org || !repositoryName) return;
+  const trimmedRepository = repositoryName.trim();
+  const token = state.token.trim();
+  const org = state.org.trim();
+  if (!token || !org || !trimmedRepository) return;
 
   state = {
     ...state,
     isLoadingBranches: true,
+    isConnected: false,
     availableBranches: [],
     branch: "",
     defaultBranch: "",
@@ -247,22 +295,23 @@ async function fetchBranchesForRepository(repositoryName: string) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        token: state.token,
-        org: state.org,
-        repositoryName,
+        token,
+        org,
+        repositoryName: trimmedRepository,
       }),
     });
 
     const data = await response.json().catch(() => null);
     if (!response.ok) {
       if (handleSsoError(data)) {
-        state = { ...state, isLoadingBranches: false };
+        state = { ...state, isLoadingBranches: false, isConnected: false };
         notify();
         return;
       }
       state = {
         ...state,
         isLoadingBranches: false,
+        isConnected: false,
         availableBranches: [],
         branch: "",
         defaultBranch: "",
@@ -281,6 +330,7 @@ async function fetchBranchesForRepository(repositoryName: string) {
     state = {
       ...state,
       isLoadingBranches: false,
+      isConnected: true,
       availableBranches,
       defaultBranch,
       branch: defaultBranch || availableBranches[0]?.name || "",
@@ -291,6 +341,7 @@ async function fetchBranchesForRepository(repositoryName: string) {
     state = {
       ...state,
       isLoadingBranches: false,
+      isConnected: false,
       availableBranches: [],
       branch: "",
       defaultBranch: "",
@@ -300,9 +351,10 @@ async function fetchBranchesForRepository(repositoryName: string) {
   }
 }
 
-export async function fetchRepositories() {
+export async function connectRepository() {
   const token = state.token.trim();
   const org = state.org.trim();
+  const repositoryName = state.selectedRepositoryName.trim();
 
   if (!token) {
     state = { ...state, error: "Please enter a GitHub Personal Access Token." };
@@ -314,110 +366,31 @@ export async function fetchRepositories() {
     notify();
     return;
   }
-
-  state = {
-    ...state,
-    isLoadingRepos: true,
-    error: null,
-    warning: null,
-    ssoUrl: null,
-    repositories: [],
-    selectedRepositoryName: "",
-    availableBranches: [],
-    branch: "",
-    defaultBranch: "",
-    tree: [],
-    truncated: false,
-    selectedPaths: new Set(),
-    fetchedFiles: [],
-  };
-  notify();
-
-  try {
-    const response = await fetch("/api/github/repos", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, org }),
-    });
-
-    const data = await response.json().catch(() => null);
-    if (!response.ok) {
-      if (handleSsoError(data)) {
-        state = { ...state, isLoadingRepos: false };
-        notify();
-        return;
-      }
-      state = {
-        ...state,
-        isLoadingRepos: false,
-        error: data?.error ?? "Failed to load repositories.",
-      };
-      notify();
-      return;
-    }
-
-    const repositories = Array.isArray(data?.repositories)
-      ? (data.repositories as GitHubRepositoryOption[])
-      : [];
-    const selectedRepositoryName =
-      repositories.length === 1 ? repositories[0].name : "";
-
-    state = {
-      ...state,
-      isLoadingRepos: false,
-      repositories,
-      selectedRepositoryName,
-      hasMore: data?.hasMore === true,
-      warning:
-        repositories.length === 0
-          ? "This organization does not have any accessible repositories."
-          : null,
-    };
+  if (!repositoryName) {
+    state = { ...state, error: "Please enter a GitHub repository name." };
     notify();
-
-    if (selectedRepositoryName) {
-      await fetchBranchesForRepository(selectedRepositoryName);
-    }
-  } catch {
-    state = {
-      ...state,
-      isLoadingRepos: false,
-      error: "Network error while loading repositories.",
-    };
-    notify();
+    return;
   }
-}
-
-export async function selectRepository(repositoryName: string) {
-  const nextRepository =
-    state.repositories.find((r) => r.name === repositoryName) ?? null;
 
   state = {
     ...state,
-    selectedRepositoryName: nextRepository?.name ?? "",
-    availableBranches: [],
-    branch: "",
-    defaultBranch: "",
-    tree: [],
-    truncated: false,
-    selectedPaths: new Set(),
-    fetchedFiles: [],
     error: null,
     warning: null,
     ssoUrl: null,
   };
   notify();
 
-  if (nextRepository) {
-    await fetchBranchesForRepository(nextRepository.name);
-  }
+  await fetchBranchesForRepository(repositoryName);
 }
 
 export async function fetchTree() {
-  if (!state.token || !state.org || !state.selectedRepositoryName) {
+  const repositoryName = state.selectedRepositoryName.trim();
+  const token = state.token.trim();
+  const org = state.org.trim();
+  if (!token || !org || !repositoryName) {
     state = {
       ...state,
-      error: "Please connect and select a repository.",
+      error: "Please enter a GitHub token, organization, and repository name.",
     };
     notify();
     return;
@@ -440,9 +413,9 @@ export async function fetchTree() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        token: state.token,
-        org: state.org,
-        repositoryName: state.selectedRepositoryName,
+        token,
+        org,
+        repositoryName,
         branch: state.branch || undefined,
       }),
     });
@@ -450,13 +423,14 @@ export async function fetchTree() {
     const data = await response.json().catch(() => null);
     if (!response.ok) {
       if (handleSsoError(data)) {
-        state = { ...state, isLoadingTree: false };
+        state = { ...state, isLoadingTree: false, isConnected: false };
         notify();
         return;
       }
       state = {
         ...state,
         isLoadingTree: false,
+        isConnected: false,
         error: data?.error ?? "Failed to load repository tree.",
       };
       notify();
@@ -469,6 +443,7 @@ export async function fetchTree() {
     state = {
       ...state,
       isLoadingTree: false,
+      isConnected: true,
       tree: Array.isArray(data?.tree) ? (data.tree as RepoTreeEntry[]) : [],
       truncated: data?.truncated === true,
       defaultBranch,
@@ -479,14 +454,40 @@ export async function fetchTree() {
     state = {
       ...state,
       isLoadingTree: false,
+      isConnected: false,
       error: "Network error while loading the repository tree.",
     };
     notify();
   }
 }
 
+/**
+ * Single-action: fetch branches (connect) then immediately fetch the tree.
+ * This is the only entry point the modal needs.
+ */
+export async function loadRepository() {
+  await connectRepository();
+
+  // If connecting failed (error set, not connected), bail out.
+  if (!state.isConnected) return;
+
+  await fetchTree();
+}
+
+/**
+ * Change the selected branch and re-fetch the tree in one action.
+ */
+export async function changeBranchAndReload(newBranch: string) {
+  state = { ...state, branch: newBranch, error: null };
+  notify();
+  await fetchTree();
+}
+
 export async function fetchSelectedFiles(): Promise<FetchFilesResult> {
-  if (!state.token || !state.org || !state.selectedRepositoryName || state.selectedPaths.size === 0) {
+  const repositoryName = state.selectedRepositoryName.trim();
+  const token = state.token.trim();
+  const org = state.org.trim();
+  if (!token || !org || !repositoryName || state.selectedPaths.size === 0) {
     return { files: [] };
   }
 
@@ -508,9 +509,9 @@ export async function fetchSelectedFiles(): Promise<FetchFilesResult> {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        token: state.token,
-        org: state.org,
-        repositoryName: state.selectedRepositoryName,
+        token,
+        org,
+        repositoryName,
         branch: state.branch || state.defaultBranch || undefined,
         files: filesToFetch,
       }),

@@ -34,6 +34,8 @@ export const SCRIPT_TYPES = [
 
 export type ScriptType = (typeof SCRIPT_TYPES)[number];
 
+export type ImportSource = 'system' | 'github';
+
 export const SUPPORTED_SCRIPT_TYPES: Record<SourceLanguage, ScriptType[]> = {
   Teradata: ['Tables', 'Views', 'Stored Procedures', 'Functions', 'BTEQ', 'MLOAD', 'TPUMP'],
   Oracle: ['Tables', 'Views', 'Stored Procedures', 'Functions', 'Packages'],
@@ -56,6 +58,7 @@ export const SUPPORTED_SCRIPT_TYPES: Record<SourceLanguage, ScriptType[]> = {
 export const WIZARD_STEPS = [
   { id: 'language', label: 'Source Language', description: 'Select your source database' },
   { id: 'scriptType', label: 'Script Type', description: 'Select script types to convert' },
+  { id: 'importSource', label: 'Import Source', description: 'Choose where to import files from' },
   { id: 'files', label: 'Source Files', description: 'Upload your SQL files' },
   { id: 'mapping', label: 'Schema Mapping', description: 'Upload schema mapping files' },
   { id: 'credentials', label: 'Snowflake Connection', description: 'Provide Snowflake credentials' },
@@ -82,6 +85,9 @@ export interface WizardState {
 
   // Step 2: Script Type
   scriptTypes: ScriptType[];
+
+  // Step 3: Import Source
+  importSource: ImportSource | '';
   
   // Step 3: Files
   sourceFiles: WizardFile[];
@@ -176,6 +182,7 @@ function getInitialState(): WizardState {
   completedSteps: [],
   sourceLanguage: '',
   scriptTypes: [],
+  importSource: '',
   sourceFiles: [],
   mappingFiles: [],
   sfAccount: saved.sfAccount,
@@ -246,6 +253,16 @@ export function toggleScriptType(scriptType: ScriptType) {
   } else {
     state = { ...state, scriptTypes: [...current, scriptType] };
   }
+  notifyListeners();
+}
+
+export function setImportSource(importSource: ImportSource) {
+  state = {
+    ...state,
+    importSource,
+    sourceFiles: [],
+    mappingFiles: [],
+  };
   notifyListeners();
 }
 
@@ -365,6 +382,8 @@ export function canProceedToNext(): boolean {
       return !!currentState.sourceLanguage;
     case 'scriptType':
       return currentState.scriptTypes.length > 0;
+    case 'importSource':
+      return currentState.importSource !== '';
     case 'files':
       return currentState.sourceFiles.length > 0;
     case 'mapping':
