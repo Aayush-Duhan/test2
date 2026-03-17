@@ -26,6 +26,7 @@ export interface Task {
 type PlanProps = {
   tasks?: Task[];
   readOnly?: boolean;
+  headerActions?: React.ReactNode;
 };
 
 const STATUS_LABEL: Record<string, string> = {
@@ -56,7 +57,7 @@ function statusBadgeClass(status: string): string {
   return "bg-white/5 text-white/65 border-white/10";
 }
 
-export default function AgentPlan({ tasks = [], readOnly = true }: PlanProps) {
+export default function AgentPlan({ tasks = [], readOnly = true, headerActions }: PlanProps) {
   const [collapsed, setCollapsed] = React.useState(false);
 
   const workflow = tasks[0];
@@ -72,14 +73,17 @@ export default function AgentPlan({ tasks = [], readOnly = true }: PlanProps) {
             {workflow?.title ?? "Migration Workflow"}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => setCollapsed((v) => !v)}
-          className="rounded-md p-1 text-white/70 transition hover:bg-white/10 hover:text-white"
-          aria-label={collapsed ? "Expand plan" : "Collapse plan"}
-        >
-          <ChevronDown className={`h-4 w-4 transition-transform ${collapsed ? "-rotate-90" : "rotate-0"}`} />
-        </button>
+        <div className="flex items-center gap-2">
+          {headerActions}
+          <button
+            type="button"
+            onClick={() => setCollapsed((v) => !v)}
+            className="rounded-md p-1 text-white/70 transition hover:bg-white/10 hover:text-white"
+            aria-label={collapsed ? "Expand plan" : "Collapse plan"}
+          >
+            <ChevronDown className={`h-4 w-4 transition-transform ${collapsed ? "-rotate-90" : "rotate-0"}`} />
+          </button>
+        </div>
       </div>
 
       {!collapsed && (

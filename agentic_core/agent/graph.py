@@ -60,6 +60,7 @@ TOOL_RESULT_DISPLAY = {
     "read_file",
     "write_file",
     "make_directory",
+    "execute_sql_range",
 }
 
 # ── System prompt ──────────────────────────────────────────────
@@ -101,6 +102,7 @@ without rewriting the entire file. Use these for targeted error recovery.
 | read_file | session_id, file_path, max_bytes | Read file contents (small files only) |
 | write_file | session_id, file_path, content, expected_hash | Write full file contents (use sparingly) |
 | make_directory | session_id, dir_path | Create a directory under project root |
+| execute_sql_range | session_id, file_path, start_line, end_line | Execute SQL statements from a specific line range |
 
 ## How to Call a Tool
 
@@ -116,6 +118,10 @@ For file tools (with additional arguments):
 
 ```json
 {{"action": "edit_file", "session_id": "{session_id}", "args": {{"file_path": "/path/to/file.sql", "start_line": 45, "end_line": 48, "new_content": "-- fixed SQL here\nSELECT 1;"}}}}
+```
+
+```json
+{{"action": "execute_sql_range", "session_id": "{session_id}", "args": {{"file_path": "/path/to/file.sql", "start_line": 120, "end_line": 180}}}}
 ```
 
 Only call ONE tool per response. Include explanation text BEFORE the JSON block.
@@ -291,6 +297,7 @@ _MULTI_ARG_TOOLS = {
     "read_file",
     "write_file",
     "make_directory",
+    "execute_sql_range",
 }
 
 

@@ -6,12 +6,15 @@ import { PromptBox } from "@/components/ui/chatgpt-prompt-input";
 import AgentPlan, { type Task } from "@/components/ui/agent-plan";
 import { SidebarInset } from "@/components/ui/sidebar";
 import { SetupWizard } from "@/components/ui/setup-wizard";
+import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { AssistantMessage } from "@/components/chat/AssistantMessage";
 import { UserMessage } from "@/components/chat/UserMessage";
 import { CodeBlock } from "@/components/chat/CodeBlock";
 import { Workbench } from "@/components/workbench";
 import type { ChatMessage } from "@/lib/chat-types";
 import { createScopedLogger } from "@/lib/logger";
+import { isActive } from "@/lib/chat-helpers";
 import { workbenchStore, type UploadedFile } from "@/lib/workbench-store";
 import { useSnapScroll } from "@/hooks/useSnapScroll";
 
@@ -31,11 +34,13 @@ interface ChatPanelProps {
   lastExecutedFileIndex: number;
   missingObjects: string[];
   isAgentThinking?: boolean;
+  isCanceling?: boolean;
   uploadedFiles?: UploadedFile[];
   onCreateProject: () => void;
   onRetryRun: () => void;
   onPickDdlFile: () => void;
   onSendAgentMessage?: (message: string) => void;
+  onCancelRun?: () => void;
 }
 
 export function ChatPanel({
@@ -52,21 +57,38 @@ export function ChatPanel({
   lastExecutedFileIndex,
   missingObjects,
   isAgentThinking = false,
+  isCanceling = false,
   uploadedFiles = [],
   onCreateProject,
   onRetryRun,
   onPickDdlFile,
   onSendAgentMessage,
+  onCancelRun,
 }: ChatPanelProps) {
   const isSessionFinished = runId !== null && ["failed", "canceled"].includes(status);
   const hasActiveRun = runId !== null;
-  const isChatInputEnabled = hasActiveRun && !isSessionFinished && !!onSendAgentMessage;
+  const isChatInputEnabled = hasActiveRun && !isSessionFinished && !!onSendAgentMessage && !isCanceling;
+  const canCancel = Boolean(runId) && isActive(status) && Boolean(onCancelRun);
+  const [showCancelDialog, setShowCancelDialog] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!canCancel && showCancelDialog) {
+      setShowCancelDialog(false);
+    }
+  }, [canCancel, showCancelDialog]);
+
+  const handleConfirmCancel = React.useCallback(() => {
+    setShowCancelDialog(false);
+    onCancelRun?.();
+  }, [onCancelRun]);
 
   const chatInputHint = !hasActiveRun
     ? null
-    : isSessionFinished
-      ? "This session has ended. Retry or start a new session to continue chatting with the agent."
-      : "Press Enter to send. Use Shift + Enter for a new line.";
+    : isCanceling
+      ? "Stopping run... This may take a moment."
+      : isSessionFinished
+        ? "This session has ended. Retry or start a new session to continue chatting with the agent."
+        : "Press Enter to send. Use Shift + Enter for a new line.";
 
   React.useEffect(() => {
     if (uploadedFiles.length > 0) {
@@ -178,7 +200,33 @@ export function ChatPanel({
         {runId ? (
           <>
             <div className="shrink-0 p-4 pb-0">
-              <AgentPlan tasks={tasks} readOnly />
+              <AgentPlan
+                tasks={tasks}
+                readOnly
+                headerActions={canCancel ? (
+                  <>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      disabled={isCanceling}
+                      onClick={() => setShowCancelDialog(true)}
+                    >
+                      {isCanceling ? "Stopping..." : "Stop run"}
+                    </Button>
+                    <ConfirmDialog
+                      open={showCancelDialog}
+                      onOpenChange={setShowCancelDialog}
+                      title="Stop run?"
+                      description="This will cancel the current run. You can retry or start a new run later."
+                      confirmLabel="Stop run"
+                      cancelLabel="Cancel"
+                      confirmDisabled={isCanceling}
+                      onConfirm={handleConfirmCancel}
+                    />
+                  </>
+                ) : null}
+              />
             </div>
 
             {requiresDdlUpload && (

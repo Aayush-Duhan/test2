@@ -17,6 +17,12 @@ from agentic_core.nodes.add_source_code import add_source_code_node
 from agentic_core.nodes.schema_mapping import apply_schema_mapping_node
 from agentic_core.nodes.convert_code import convert_code_node
 from agentic_core.nodes.execute_sql import execute_sql_node
+from agentic_core.runtime.snowflake_execution import (
+    SQLExecutionError,
+    build_snowflake_connection,
+    close_connection,
+    execute_sql_statements,
+)
 from agentic_core.nodes.validate import validate_node
 
 from agentic_core.nodes.finalize import finalize_node
@@ -187,6 +193,48 @@ def _get_file_policy(ctx: MigrationContext, *, allow_hidden: Optional[bool] = No
     return policy
 
 
+def _read_sql_line_range(
+    file_path: str,
+    start_line: int,
+    end_line: int,
+    *,
+    policy: Optional[FileAccessPolicy] = None,
+) -> tuple[str, dict[str, Any] | None]:
+    actual_end = end_line if end_line > 0 else None
+    view = view_file_section(
+        file_path,
+        start_line,
+        actual_end,
+        policy=policy,
+    )
+    if not isinstance(view, dict) or view.get("error"):
+        return "", view
+    if view.get("truncated"):
+        return "", {
+            "error": "Selected range exceeds read limits; reduce the line range.",
+            "file_path": view.get("file_path"),
+            "start_line": view.get("start_line"),
+            "end_line": view.get("end_line"),
+            "total_lines": view.get("total_lines"),
+        }
+
+    raw_lines: list[str] = []
+    for row in str(view.get("content", "")).splitlines():
+        sep = row.find(": ")
+        raw_lines.append(row[sep + 2:] if sep >= 0 else row)
+
+    sql_text = "\n".join(raw_lines).strip()
+    if not sql_text:
+        return "", {
+            "error": "Selected range is empty.",
+            "file_path": view.get("file_path"),
+            "start_line": view.get("start_line"),
+            "end_line": view.get("end_line"),
+            "total_lines": view.get("total_lines"),
+        }
+    return sql_text, view
+
+
 # ── Tool definitions ───────────────────────────────────────────
 
 @tool
@@ -257,6 +305,158 @@ def execute_sql(session_id: str) -> str:
     if cb:
         cb("execute_sql", "completed" if result["success"] else "failed")
     return json.dumps(result, default=str)
+
+
+@tool
+def execute_sql_range(
+    session_id: str,
+    file_path: str = "",
+    start_line: int = 1,
+    end_line: int = 0,
+) -> str:
+    """Execute SQL statements from a specific line range within a converted SQL file."""
+    ctx = get_active_context(session_id)
+
+    if not file_path:
+        if ctx.converted_files:
+            file_path = ctx.converted_files[0]
+        else:
+            return json.dumps({"tool": "execute_sql_range", "success": False, "error": "file_path is required"})
+
+    policy = _get_file_policy(ctx)
+    sql_text, view = _read_sql_line_range(file_path, start_line, end_line, policy=policy)
+    if not sql_text or (view and view.get("error")):
+        return json.dumps(
+            {
+                "tool": "execute_sql_range",
+                "success": False,
+                "error": (view or {}).get("error", "Unable to read SQL range"),
+                "file_path": (view or {}).get("file_path", file_path),
+                "start_line": (view or {}).get("start_line", start_line),
+                "end_line": (view or {}).get("end_line", end_line),
+            },
+            default=str,
+        )
+
+    on_statement = getattr(ctx, "execution_event_sink", None)
+    range_start = int((view or {}).get("start_line", start_line))
+    range_end = int((view or {}).get("end_line", end_line))
+    resolved_path = (view or {}).get("file_path", file_path)
+
+    def range_statement_sink(entry: dict[str, Any]) -> None:
+        if callable(on_statement):
+            on_statement(
+                {
+                    **entry,
+                    "file": resolved_path,
+                    "fileIndex": -1,
+                    "lineRange": {"start": range_start, "end": range_end},
+                }
+            )
+
+    try:
+        connection = build_snowflake_connection(ctx)
+        try:
+            statement_results = execute_sql_statements(
+                connection,
+                sql_text,
+                on_statement=range_statement_sink,
+            )
+        finally:
+            close_connection(connection)
+
+        ctx.execution_log.append(
+            {
+                "file": resolved_path,
+                "index": -1,
+                "status": "success",
+                "source": "manual_range",
+                "line_range": {"start": range_start, "end": range_end},
+                "statements": statement_results,
+            }
+        )
+        set_active_context(session_id, ctx)
+        return json.dumps(
+            {
+                "tool": "execute_sql_range",
+                "success": True,
+                "file_path": resolved_path,
+                "start_line": range_start,
+                "end_line": range_end,
+                "statements_executed": len(statement_results),
+                "statement_results": statement_results,
+            },
+            default=str,
+        )
+    except SQLExecutionError as exc:
+        ctx.execution_errors.append(
+            {
+                "type": "execution_error",
+                "message": str(exc),
+                "stage": "execute_sql_range",
+                "statement": getattr(exc, "statement", ""),
+                "statement_index": getattr(exc, "statement_index", -1),
+            }
+        )
+        ctx.execution_log.append(
+            {
+                "file": resolved_path,
+                "index": -1,
+                "status": "failed",
+                "source": "manual_range",
+                "line_range": {"start": range_start, "end": range_end},
+                "error_type": "execution_error",
+                "error_message": str(exc),
+                "statements": list(getattr(exc, "partial_results", []) or []),
+                "failed_statement": getattr(exc, "statement", ""),
+                "failed_statement_index": getattr(exc, "statement_index", -1),
+            }
+        )
+        set_active_context(session_id, ctx)
+        return json.dumps(
+            {
+                "tool": "execute_sql_range",
+                "success": False,
+                "error": str(exc),
+                "file_path": resolved_path,
+                "start_line": range_start,
+                "end_line": range_end,
+                "failed_statement": getattr(exc, "statement", ""),
+                "failed_statement_index": getattr(exc, "statement_index", -1),
+            },
+            default=str,
+        )
+    except Exception as exc:
+        ctx.execution_errors.append(
+            {
+                "type": "execution_error",
+                "message": str(exc),
+                "stage": "execute_sql_range",
+            }
+        )
+        ctx.execution_log.append(
+            {
+                "file": resolved_path,
+                "index": -1,
+                "status": "failed",
+                "source": "manual_range",
+                "line_range": {"start": range_start, "end": range_end},
+                "error_type": "execution_error",
+                "error_message": str(exc),
+            }
+        )
+        set_active_context(session_id, ctx)
+        return json.dumps(
+            {
+                "tool": "execute_sql_range",
+                "success": False,
+                "error": str(exc),
+                "file_path": resolved_path,
+                "start_line": range_start,
+                "end_line": range_end,
+            },
+            default=str,
+        )
 
 
 @tool
@@ -536,6 +736,7 @@ ALL_TOOLS = [
     apply_schema_mapping,
     convert_code,
     execute_sql,
+    execute_sql_range,
     validate_output,
 
     finalize_migration,

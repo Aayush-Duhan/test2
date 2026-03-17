@@ -243,6 +243,7 @@ export default function SessionsPage() {
   const [status, setStatus] = React.useState("idle");
   const [error, setError] = React.useState<string | null>(null);
   const [isBusy, setIsBusy] = React.useState(false);
+  const [isCanceling, setIsCanceling] = React.useState(false);
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
 
   /* Sidebar reload -- bump to tell the sidebar to re-fetch sessions */
@@ -275,6 +276,7 @@ export default function SessionsPage() {
   const hydrateRun = React.useCallback(async (targetRunId: string) => {
     setIsBusy(true);
     setError(null);
+    setIsCanceling(false);
     workbenchStore.clearTerminal();
     const res = await fetch(`/api/runs/${targetRunId}`, { cache: "no-store" });
     if (!res.ok) { setError("Unable to load session"); setIsBusy(false); return; }
@@ -284,6 +286,9 @@ export default function SessionsPage() {
     setSelectedSessionId(targetRunId);
     setPromptMode("chat");
     setStatus(data.status ?? "idle");
+    if (!isActive(data.status ?? "idle")) {
+      setIsCanceling(false);
+    }
     setSteps(mergeSteps(data.steps));
     setProjectId(data.projectId ?? null);
     setSourceId(data.sourceId ?? null);
@@ -343,6 +348,9 @@ export default function SessionsPage() {
       }
 
       setStatus(nextStatus);
+      if (!isActive(nextStatus)) {
+        setIsCanceling(false);
+      }
       setSteps(mergeSteps(data.steps));
       setRequiresDdlUpload(Boolean(data.requiresDdlUpload));
       setMissingObjects(Array.isArray(data.missingObjects) ? data.missingObjects : []);
@@ -355,12 +363,14 @@ export default function SessionsPage() {
       if (nextStatus === "completed") {
         setIsAgentThinking(false);
         activeStepRef.current = null;
+        setIsCanceling(false);
         reloadSidebar();
       }
 
       if (nextStatus === "failed" || nextStatus === "canceled") {
         setIsAgentThinking(false);
         activeStepRef.current = null;
+        setIsCanceling(false);
         reloadSidebar();
       }
     } catch {
@@ -418,6 +428,7 @@ export default function SessionsPage() {
 
     setIsBusy(true);
     setError(null);
+    setIsCanceling(false);
     setSteps(STEP_BLUEPRINT);
     setMessages([]);
     setExecuteStatements([]);
@@ -446,6 +457,7 @@ export default function SessionsPage() {
     setRunId(data.runId);
     setSelectedSessionId(data.runId);
     setStatus("running");
+    setIsCanceling(false);
     setPromptMode("chat");
     setIsBusy(false);
     reloadSidebar();
@@ -456,6 +468,7 @@ export default function SessionsPage() {
     if (!runId) return;
     setIsBusy(true);
     setError(null);
+    setIsCanceling(false);
     const res = await fetch(`/api/runs/${runId}/retry`, { method: "POST" });
     if (!res.ok) { setError("Retry failed"); setIsBusy(false); return; }
 
@@ -463,6 +476,7 @@ export default function SessionsPage() {
     setRunId(data.runId);
     setSelectedSessionId(data.runId);
     setStatus("running");
+    setIsCanceling(false);
     setSteps(STEP_BLUEPRINT);
     setMessages([]);
     setExecuteStatements([]);
@@ -482,6 +496,7 @@ export default function SessionsPage() {
     if (!runId) return;
     setIsBusy(true);
     setError(null);
+    setIsCanceling(false);
     try {
       const fd = new FormData();
       fd.append("ddlFile", ddlFile);
@@ -501,6 +516,7 @@ export default function SessionsPage() {
       setRunId(data.runId);
       setSelectedSessionId(data.runId);
       setStatus("running");
+      setIsCanceling(false);
       setSteps(STEP_BLUEPRINT);
       setMessages((prev) => [
         ...prev,
@@ -541,6 +557,7 @@ export default function SessionsPage() {
     
     setIsBusy(true);
     setError(null);
+    setIsCanceling(false);
     const projectName = uuidv4();
     
     try {
@@ -654,6 +671,7 @@ export default function SessionsPage() {
       setStatus("completed");
       setIsAgentThinking(false);
       activeStepRef.current = null;
+      setIsCanceling(false);
       if (!chatSchemaReadyRef.current) {
         setMessages((prev) => [...prev, makeMessage("system", "Migration completed.", "run_status")]);
       }
@@ -664,10 +682,12 @@ export default function SessionsPage() {
     source.addEventListener("run:failed", (event) => {
       const payload = JSON.parse((event as MessageEvent).data);
       const reason = payload.reason || "Run failed";
+      const canceled = String(reason).toLowerCase().includes("canceled");
       setError(reason);
       setIsAgentThinking(false);
       activeStepRef.current = null;
-      setStatus(reason === "canceled" ? "canceled" : "failed");
+      setStatus(canceled ? "canceled" : "failed");
+      setIsCanceling(false);
       const paused =
         String(reason).toLowerCase().includes("upload ddl") ||
         String(reason).toLowerCase().includes("missing object");
@@ -708,6 +728,27 @@ export default function SessionsPage() {
     return () => source.close();
   }, [runId, status, reloadSidebar, reconcileRunSnapshot]);
 
+  /* -- Cancel run ------------------------------------------------------------------------------- */
+  const cancelRun = async () => {
+    if (!runId || !isActive(status) || isCanceling) return;
+    setIsCanceling(true);
+    try {
+      const res = await fetch(`/api/runs/${runId}/cancel`, { method: "POST" });
+      if (!res.ok) {
+        setError("Unable to cancel run");
+        setIsCanceling(false);
+        return;
+      }
+      setMessages((prev) => [
+        ...prev,
+        makeMessage("system", "Cancel requested. Waiting for the run to stop...", "run_status"),
+      ]);
+    } catch {
+      setError("Unable to cancel run");
+      setIsCanceling(false);
+    }
+  };
+
   /* -- Render ------------------------------------------------------------------------------------ */
   return (
     <div
@@ -739,6 +780,7 @@ export default function SessionsPage() {
             status={status}
             error={error}
             isBusy={isBusy}
+            isCanceling={isCanceling}
             messages={messages}
             tasks={tasks}
             requiresDdlUpload={requiresDdlUpload}
@@ -749,6 +791,7 @@ export default function SessionsPage() {
             onCreateProject={handleConfirm}
             onRetryRun={retryRun}
             onPickDdlFile={() => ddlFileInputRef.current?.click()}
+            onCancelRun={cancelRun}
             onSendAgentMessage={runId ? async (message: string) => {
               try {
                 const response = await fetch(`/api/runs/${runId}/chat`, {
