@@ -728,6 +728,28 @@ def make_directory(
     return json.dumps(result, default=str)
 
 
+# ── Pause tool ─────────────────────────────────────────────────
+
+@tool
+def pause(session_id: str, reason: str = "Agent paused", status: str = "blocked") -> str:
+    """Stop the agent loop. Use when:
+    - The migration is complete (status: "completed")
+    - You need user action — missing schemas, permissions, etc. (status: "blocked")
+    - You hit an unrecoverable error after retrying (status: "error")
+
+    Args:
+        session_id: The active migration session ID.
+        reason: Brief explanation of why you are stopping.
+        status: One of "completed", "blocked", or "error".
+    """
+    return json.dumps({
+        "tool": "pause",
+        "success": True,
+        "reason": reason,
+        "status": status,
+    })
+
+
 # ── Tool registry ──────────────────────────────────────────────
 
 ALL_TOOLS = [
@@ -749,4 +771,42 @@ ALL_TOOLS = [
     write_file,
     edit_file_batch,
     make_directory,
+    pause,
 ]
+
+
+# ── OpenAI function-calling schema converter ───────────────────
+
+def tools_to_openai_schema(tools: list | None = None) -> list[dict]:
+    """Convert LangChain @tool functions to OpenAI function-calling format.
+
+    Returns a list of dicts suitable for the ``tools`` parameter of the
+    Cortex REST API Chat Completions endpoint.
+    """
+    if tools is None:
+        tools = ALL_TOOLS
+
+    result: list[dict] = []
+    for t in tools:
+        # LangChain tools expose args_schema (a Pydantic model)
+        if hasattr(t, "args_schema") and t.args_schema is not None:
+            try:
+                params = t.args_schema.model_json_schema()
+            except Exception:
+                params = t.args_schema.schema() if hasattr(t.args_schema, "schema") else {"type": "object", "properties": {}}
+        else:
+            params = {"type": "object", "properties": {}}
+
+        # Clean up schema — remove pydantic metadata keys the API doesn't need
+        params.pop("title", None)
+        params.pop("description", None)
+
+        result.append({
+            "type": "function",
+            "function": {
+                "name": t.name,
+                "description": t.description or "",
+                "parameters": params,
+            },
+        })
+    return result

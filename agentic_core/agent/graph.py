@@ -1,15 +1,15 @@
-"""Autonomous agent loop — direct Cortex API calls with manual tool dispatch.
+"""Autonomous agent loop — Cortex REST API with native tool calling.
 
-Instead of LangGraph's StateGraph + ToolNode (which is incompatible with
-Snowflake Cortex), this module implements a simple ReAct-style loop:
+Uses the Snowflake Cortex Chat Completions REST API with:
+- Native tool calling (OpenAI function-calling format)
+- Streaming SSE for real-time token delivery
+- Structured tool dispatch (no text parsing needed)
 
-    1. Build prompt with conversation history
-    2. Call Cortex complete()
-    3. Parse the response for a JSON action block
-    4. If action found → execute tool → add result to history → goto 1
-    5. If no action → agent is done talking or waiting for user → stop
-
-This is the bolt.new-style approach: direct API, full control, no framework tax.
+Flow:
+    1. Build messages with conversation history
+    2. Call Cortex REST API with tools schema
+    3. If response has tool_calls → execute tool → add result → goto 1
+    4. If response has content only → agent is done → stop
 """
 
 from __future__ import annotations
@@ -17,8 +17,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
-import time
 from typing import Any, Callable, Optional
 
 from agentic_core.agent.context_logger import (
@@ -35,12 +33,16 @@ from agentic_core.agent.context_logger import (
     log_stopping,
 )
 
-from agentic_core.agent.cortex_chat import call_cortex_complete, get_cortex_session
+from agentic_core.agent.cortex_chat import (
+    get_cortex_session,
+    stream_cortex_to_response,
+)
 from agentic_core.agent.tools import (
     ALL_TOOLS,
     get_active_context,
     set_active_context,
     set_step_callback,
+    tools_to_openai_schema,
 )
 from agentic_core.models.context import MigrationContext, MigrationState
 
@@ -71,121 +73,67 @@ using tools and communicate with the user.
 
 ## Available Tools
 
-### Pipeline Tools (session_id only)
+You have access to the following tools via function calling. The system will \
+automatically provide the tool schemas — call them by name with the required arguments.
 
-The session_id is: {session_id}
+### Pipeline Tools
+These accept only `session_id` (value: {session_id}):
+- **init_project** — Initialize the SCAI project (always first)
+- **add_source_code** — Ingest source SQL files
+- **apply_schema_mapping** — Apply schema mapping CSV (skips if no CSV)
+- **convert_code** — Convert source SQL to Snowflake SQL
+- **execute_sql** — Execute converted SQL on Snowflake
+- **validate_output** — Validate the conversion quality
+- **finalize_migration** — Generate final report (only after success)
 
-| Tool | Description |
-|------|-------------|
-| init_project | Initialize the SCAI project (always first) |
-| add_source_code | Ingest source SQL files |
-| apply_schema_mapping | Apply schema mapping CSV (skips if no CSV) |
-| convert_code | Convert source SQL to Snowflake SQL |
-| execute_sql | Execute converted SQL on Snowflake |
-| validate_output | Validate the conversion quality |
-| finalize_migration | Generate final report (only after success) |
-| pause | Stop the agent loop (see below) |
+### File Tools
+These accept `session_id` plus additional arguments:
+- **get_converted_file_info** — Get metadata (paths, lines, size)
+- **view_file** — View a section of a file with line numbers
+- **edit_file** — Replace a range of lines with new content
+- **edit_file_batch** — Apply multiple line edits in one call
+- **list_files** — List files/directories under project root
+- **search_file** — Search within a file
+- **read_file** — Read file contents
+- **write_file** — Write full file contents
+- **make_directory** — Create a directory
+- **execute_sql_range** — Execute SQL from a specific line range
 
-### File Tools (multi-argument)
+### Control
+- **pause** — Stop the agent loop (reason + status: completed/blocked/error)
 
-These tools allow you to inspect and surgically edit converted SQL files \
-without rewriting the entire file. Use these for targeted error recovery.
+## Important Notes
 
-| Tool | Arguments | Description |
-|------|-----------|-------------|
-| get_converted_file_info | session_id | Get metadata (paths, total lines, size) of converted files |
-| view_file | session_id, file_path, start_line, end_line | View a section of a file with line numbers |
-| edit_file | session_id, file_path, start_line, end_line, new_content | Replace a range of lines with new content |
-| edit_file_batch | session_id, file_path, edits | Apply multiple line edits in one call |
-| list_files | session_id, dir_path, depth, pattern, include_hidden | List files/directories under project root |
-| search_file | session_id, file_path, query, regex, case_sensitive, max_results | Search within a file |
-| read_file | session_id, file_path, max_bytes | Read file contents (small files only) |
-| write_file | session_id, file_path, content, expected_hash | Write full file contents (use sparingly) |
-| make_directory | session_id, dir_path | Create a directory under project root |
-| execute_sql_range | session_id, file_path, start_line, end_line | Execute SQL statements from a specific line range |
-
-## How to Call a Tool
-
-For pipeline tools (session_id only):
-```json
-{{"action": "TOOL_NAME", "session_id": "{session_id}"}}
-```
-
-For file tools (with additional arguments):
-```json
-{{"action": "view_file", "session_id": "{session_id}", "args": {{"file_path": "/path/to/file.sql", "start_line": 1, "end_line": 100}}}}
-```
-
-```json
-{{"action": "edit_file", "session_id": "{session_id}", "args": {{"file_path": "/path/to/file.sql", "start_line": 45, "end_line": 48, "new_content": "-- fixed SQL here\nSELECT 1;"}}}}
-```
-
-```json
-{{"action": "execute_sql_range", "session_id": "{session_id}", "args": {{"file_path": "/path/to/file.sql", "start_line": 120, "end_line": 180}}}}
-```
-
-Only call ONE tool per response. Include explanation text BEFORE the JSON block.
-
-## How to Pause (Stop the Loop)
-
-Call `pause` when you need to stop. Use it when:
-- The migration is **complete** (status: "completed")
-- You hit an error that **requires user action** — missing schemas, permissions, etc. (status: "blocked")
-- You encounter an **unrecoverable error** after retrying (status: "error")
-
-```json
-{{"action": "pause", "session_id": "{session_id}", "args": {{"reason": "Brief explanation of why you are stopping", "status": "completed|blocked|error"}}}}
-```
-
-**You MUST call pause to stop.** If you respond without any action block, the loop \
-will continue and you will be prompted again. Always call pause when you are done \
-or cannot proceed.
-
-## How to Send a Final Message (No Tool)
-
-When you want to communicate without calling a tool (e.g., summarizing results \
-or responding to the user), just write your message normally WITHOUT any JSON block.
-
-## Response Format
-
-- All human-readable text must be written in GitHub-flavored Markdown.
-- Use short headings, bullets, and numbered steps when helpful.
-- Use fenced code blocks for SQL, JSON, logs, and file snippets.
-- If you call a tool, write the explanation in Markdown first, then put the tool JSON in a single ```json fenced block.
-- Do not return plain prose paragraphs when Markdown structure would improve readability.
-- Do not wrap a final no-tool response in JSON.
+- Always pass `session_id` = "{session_id}" to every tool call.
+- Call ONE tool at a time. Wait for results before deciding next action.
+- If you want to communicate without calling a tool, just write your message.
 
 ## Execution Strategy
 
 1. Start with init_project → add_source_code → apply_schema_mapping → convert_code → execute_sql
 2. After execute_sql:
    - Success → validate_output → finalize_migration
-   - Errors (NOT missing objects) → use get_converted_file_info, view_file, and edit_file to diagnose and fix the specific error, then execute_sql again (retry up to 5 times)
-   - Missing objects / DDL needed → tell the user, STOP (do not retry)
+   - Errors (NOT missing objects) → use get_converted_file_info, view_file, \
+and edit_file to diagnose and fix, then execute_sql again (retry up to 5 times)
+   - Missing objects / DDL needed → tell the user, call pause with status "blocked"
 3. After validate_output:
    - Passed → finalize_migration
    - Failed → use view_file + edit_file to fix, then execute_sql again
 
-## Error Recovery Strategy (IMPORTANT)
+## Error Recovery Strategy
 
 When you encounter execution or validation errors:
 1. Call get_converted_file_info to see the file paths and sizes
-2. Use the error message to identify the problematic area (line numbers, syntax errors, etc.)
-3. Call view_file to examine the relevant section of the file (around the error)
+2. Use the error message to identify the problematic area
+3. Call view_file to examine the relevant section
 4. Call edit_file to apply a targeted fix to ONLY the affected lines
-5. Do NOT rewrite the entire file. Only change the lines that need fixing.
-6. After editing, call execute_sql to retry
-7. If the same error persists after 3 attempts, explain the issue to the user and stop.
+5. After editing, call execute_sql to retry
+6. If the same error persists after 3 attempts, explain the issue and call pause
 
-This approach prevents code truncation on large files and gives you full control over the fix.
+## Response Format
 
-## Rules
-- Before each tool call, briefly explain what you are doing and why.
-- After each tool result, summarize the outcome concisely.
-- If you encounter errors, explain them clearly.
-- When the user sends a message, respond helpfully.
-- Be concise but informative.
-- Always use view_file + edit_file for error recovery. Never attempt to rewrite entire files.
+All human-readable text must be in GitHub-flavored Markdown.
+Use short headings, bullets, and fenced code blocks for SQL/JSON/logs.
 
 ## Project Info
 Source language: {source_language}
@@ -193,20 +141,23 @@ Project name: {project_name}
 Has schema mapping: {has_schema_mapping}
 """
 
-# ── Action parsing ─────────────────────────────────────────────
+# ── Tool dispatch ──────────────────────────────────────────────
 
-_ACTION_PATTERN = re.compile(
-    r'\{\s*"action"\s*:\s*"(\w+)"\s*,\s*"session_id"\s*:\s*"([^"]+)"\s*(?:,\s*"args"\s*:\s*(\{[^}]*\}))?\s*\}',
-    re.DOTALL,
-)
+_TOOL_MAP = {t.name: t for t in ALL_TOOLS}
 
-# Also match code-fenced JSON blocks — captures the full JSON for re-parsing
-_FENCED_JSON_PATTERN = re.compile(
-    r'```(?:json)?\s*\n?(\{.*?\})\s*\n?```',
-    re.DOTALL,
-)
-
-VALID_TOOL_NAMES = {t.name for t in ALL_TOOLS} | {"pause"}
+# Tools that accept extra arguments beyond session_id
+_MULTI_ARG_TOOLS = {
+    "view_file",
+    "edit_file",
+    "edit_file_batch",
+    "list_files",
+    "search_file",
+    "read_file",
+    "write_file",
+    "make_directory",
+    "execute_sql_range",
+    "pause",
+}
 
 
 def _format_tool_result_for_chat(tool_name: str, tool_result: str) -> str:
@@ -230,75 +181,6 @@ def _format_tool_result_for_chat(tool_name: str, tool_result: str) -> str:
         "preview": payload[:MAX_TOOL_RESULT_CHARS],
     }
     return json.dumps(wrapper, indent=2, ensure_ascii=False, default=str)
-
-
-def parse_action(response_text: str) -> tuple[str | None, str | None, str, dict]:
-    """Parse tool action from LLM response.
-
-    Returns:
-        (tool_name, session_id, reasoning_text, extra_args)
-        tool_name is None if no action was found.
-        extra_args is a dict of additional arguments (from "args" key).
-    """
-    def _try_parse_json_block(text: str) -> tuple[str | None, str | None, str, dict]:
-        """Attempt to parse a JSON action block from text."""
-        try:
-            data = json.loads(text)
-            action = data.get("action")
-            sid = data.get("session_id")
-            args = data.get("args", {})
-            if action and action in VALID_TOOL_NAMES and sid:
-                return action, sid, "", args if isinstance(args, dict) else {}
-        except (json.JSONDecodeError, TypeError):
-            pass
-        return None, None, "", {}
-
-    # Try fenced block first
-    match = _FENCED_JSON_PATTERN.search(response_text)
-    if match:
-        tool_name, session_id, _, args = _try_parse_json_block(match.group(1))
-        if tool_name:
-            reasoning = response_text[:match.start()].strip()
-            return tool_name, session_id, reasoning, args
-
-    # Try bare JSON — find the last { that looks like an action
-    match = _ACTION_PATTERN.search(response_text)
-    if match:
-        tool_name, session_id = match.group(1), match.group(2)
-        # Try to parse the full JSON block for args
-        # Find the full JSON starting from this match
-        json_start = match.start()
-        # Try to find the complete JSON by parsing from the match start
-        remaining = response_text[json_start:]
-        _, _, _, args = _try_parse_json_block(remaining.strip())
-        if not args and match.group(3):
-            try:
-                args = json.loads(match.group(3))
-            except (json.JSONDecodeError, TypeError):
-                args = {}
-        reasoning = response_text[:json_start].strip()
-        if tool_name in VALID_TOOL_NAMES:
-            return tool_name, session_id, reasoning, args
-
-    return None, None, response_text.strip(), {}
-
-
-# ── Tool dispatch ──────────────────────────────────────────────
-
-_TOOL_MAP = {t.name: t for t in ALL_TOOLS}
-
-# Tools that accept extra arguments beyond session_id
-_MULTI_ARG_TOOLS = {
-    "view_file",
-    "edit_file",
-    "edit_file_batch",
-    "list_files",
-    "search_file",
-    "read_file",
-    "write_file",
-    "make_directory",
-    "execute_sql_range",
-}
 
 
 def execute_tool(tool_name: str, session_id: str, extra_args: dict | None = None) -> str:
@@ -331,7 +213,7 @@ def run_agent_loop(
     consume_user_messages_from_start: bool = False,
     start_with_migration_prompt: bool = True,
 ) -> MigrationContext:
-    """Run the autonomous agent loop.
+    """Run the autonomous agent loop with native tool calling.
 
     Args:
         context: MigrationContext with all configuration and callbacks.
@@ -356,8 +238,11 @@ def run_agent_loop(
     )
     logger.info("Agent context log: %s", log_file)
 
-    # Get Snowpark session for Cortex calls
+    # Get Snowpark session for Cortex REST API calls
     sf_session = get_cortex_session(context)
+
+    # Build OpenAI-format tools schema
+    openai_tools = tools_to_openai_schema()
 
     def emit(role: str, kind: str, content: str) -> None:
         if message_callback and content.strip():
@@ -366,20 +251,19 @@ def run_agent_loop(
             except Exception:
                 pass
 
-    def sync_conversation(conversation: list[dict[str, str]]) -> None:
+    def sync_conversation(conversation: list[dict]) -> None:
         if not conversation_callback:
             return
-
         try:
-            conversation_callback(
-                [
-                    {
-                        "role": str(message.get("role", "user")),
-                        "content": str(message.get("content", "")),
-                    }
-                    for message in conversation
-                ]
-            )
+            # Only sync serializable messages (filter out tool_calls objects)
+            serializable = []
+            for msg in conversation:
+                entry = {
+                    "role": str(msg.get("role", "user")),
+                    "content": str(msg.get("content", "") or ""),
+                }
+                serializable.append(entry)
+            conversation_callback(serializable)
         except Exception:
             pass
 
@@ -392,7 +276,7 @@ def run_agent_loop(
     )
 
     if conversation_history:
-        conversation = [
+        conversation: list[dict] = [
             {
                 "role": str(message.get("role", "user")),
                 "content": str(message.get("content", "")),
@@ -428,20 +312,19 @@ def run_agent_loop(
                 user_msg = user_message_getter()
                 if user_msg and user_msg.strip():
                     log_user_message(session_id, user_msg)
-                    # Need to ensure role alternation — if last message is user,
-                    # we can't add another user message
                     if conversation[-1]["role"] == "user":
                         conversation[-1]["content"] += f"\n\nUser message: {user_msg}"
                     else:
                         conversation.append({"role": "user", "content": user_msg})
                     sync_conversation(conversation)
 
-            # ── Call Cortex ────────────────────────────────────
+            # ── Call Cortex REST API with tools ────────────────
             log_llm_request(session_id, len(conversation))
             try:
-                response_text = call_cortex_complete(
+                response = stream_cortex_to_response(
                     sf_session,
                     conversation,
+                    tools=openai_tools,
                     max_tokens=4096,
                 )
             except Exception as exc:
@@ -452,74 +335,111 @@ def run_agent_loop(
                 log_stopping(session_id, error_msg)
                 break
 
-            log_llm_response(session_id, response_text)
+            content = response.get("content") or ""
+            tool_calls = response.get("tool_calls")
+            finish_reason = response.get("finish_reason", "stop")
 
-            # Add assistant response to conversation
-            conversation.append({"role": "assistant", "content": response_text})
+            log_llm_response(session_id, content or json.dumps(tool_calls or [], default=str))
+
+            # ── Build assistant message for conversation ───────
+            assistant_msg: dict[str, Any] = {"role": "assistant"}
+            if content:
+                assistant_msg["content"] = content
+            if tool_calls:
+                assistant_msg["tool_calls"] = tool_calls
+                if not content:
+                    assistant_msg["content"] = None
+
+            conversation.append(assistant_msg)
             sync_conversation(conversation)
 
-            # ── Parse action ───────────────────────────────────
-            tool_name, tool_session_id, reasoning, extra_args = parse_action(response_text)
-            log_parsed_action(session_id, tool_name, reasoning, extra_args)
-
-            # Emit the reasoning/text part
-            if reasoning:
-                if tool_name:
-                    emit("agent", "thinking", reasoning)
-                else:
-                    emit("agent", "agent_response", reasoning)
-
-            # ── Pause → agent wants to stop ─────────────────────
-            if tool_name == "pause":
-                pause_reason = extra_args.get("reason", "Agent paused")
-                pause_status = extra_args.get("status", "blocked")
-                log_stopping(session_id, f"Agent paused ({pause_status}): {pause_reason}")
-                if pause_status == "completed":
-                    emit("system", "run_status", "Migration completed successfully!")
-                elif pause_status == "error":
-                    emit("error", "run_status", f"Agent stopped: {pause_reason}")
-                else:
-                    emit("system", "run_status", f"Agent paused: {pause_reason}")
-                break
-
-            # ── No tool call → just a message, keep going ──────
-            if tool_name is None:
+            # ── No tool calls → text response ──────────────────
+            if not tool_calls:
+                if content:
+                    emit("agent", "agent_response", content)
+                log_parsed_action(session_id, None, content, {})
                 continue
 
-            # ── Execute tool ───────────────────────────────────
-            logger.info("Agent calling tool: %s", tool_name)
-            emit("system", "step_started", f"Executing: {tool_name}")
-            log_tool_start(session_id, tool_name)
+            # ── Process tool calls ─────────────────────────────
+            for tc in tool_calls:
+                tc_id = tc.get("id", "")
+                func = tc.get("function", {})
+                tool_name = func.get("name", "")
+                arguments_str = func.get("arguments", "{}")
 
-            tool_result = execute_tool(tool_name, tool_session_id or session_id, extra_args)
+                try:
+                    extra_args = json.loads(arguments_str) if arguments_str else {}
+                except json.JSONDecodeError:
+                    extra_args = {}
 
-            # Parse result for summary
-            try:
-                result_data = json.loads(tool_result)
-                success = result_data.get("success", False)
-                summary = result_data.get("summary", "")
-                step_status = "completed" if success else "failed"
-            except (json.JSONDecodeError, TypeError):
-                success = True
-                summary = tool_result[:200]
-                step_status = "completed"
+                log_parsed_action(session_id, tool_name, content or "", extra_args)
 
-            log_tool_result(session_id, tool_name, tool_result, success, summary)
+                # Emit reasoning text (if the model included content alongside tool call)
+                if content:
+                    emit("agent", "thinking", content)
+                    content = ""  # Only emit once for multi-tool responses
 
-            if tool_name in TOOL_RESULT_DISPLAY:
-                tool_payload = _format_tool_result_for_chat(tool_name, tool_result)
-                emit("agent", "tool_result", tool_payload)
+                # ── Handle pause ───────────────────────────────
+                if tool_name == "pause":
+                    pause_reason = extra_args.get("reason", "Agent paused")
+                    pause_status = extra_args.get("status", "blocked")
+                    log_stopping(session_id, f"Agent paused ({pause_status}): {pause_reason}")
+                    if pause_status == "completed":
+                        emit("system", "run_status", "Migration completed successfully!")
+                    elif pause_status == "error":
+                        emit("error", "run_status", f"Agent stopped: {pause_reason}")
+                    else:
+                        emit("system", "run_status", f"Agent paused: {pause_reason}")
 
-            # Add tool result as a user message (maintaining role alternation)
-            tool_result_msg = f"Tool `{tool_name}` result:\n```json\n{tool_result}\n```"
-            conversation.append({"role": "user", "content": tool_result_msg})
-            sync_conversation(conversation)
+                    # Add tool result to conversation
+                    conversation.append({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": json.dumps({"status": pause_status, "reason": pause_reason}),
+                    })
+                    sync_conversation(conversation)
+                    return get_active_context(session_id)
+
+                # ── Execute tool ───────────────────────────────
+                logger.info("Agent calling tool: %s", tool_name)
+                emit("system", "step_started", f"Executing: {tool_name}")
+                log_tool_start(session_id, tool_name)
+
+                tool_result = execute_tool(
+                    tool_name,
+                    extra_args.pop("session_id", session_id),
+                    extra_args,
+                )
+
+                # Parse result for summary
+                try:
+                    result_data = json.loads(tool_result)
+                    success = result_data.get("success", False)
+                    summary = result_data.get("summary", "")
+                    step_status = "completed" if success else "failed"
+                except (json.JSONDecodeError, TypeError):
+                    success = True
+                    summary = tool_result[:200]
+                    step_status = "completed"
+
+                log_tool_result(session_id, tool_name, tool_result, success, summary)
+
+                if tool_name in TOOL_RESULT_DISPLAY:
+                    tool_payload = _format_tool_result_for_chat(tool_name, tool_result)
+                    emit("agent", "tool_result", tool_payload)
+
+                # Add tool result as role: "tool" message (API format)
+                conversation.append({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": tool_result,
+                })
+                sync_conversation(conversation)
 
         return get_active_context(session_id)
 
     finally:
         close_log(session_id)
-        # Close Snowpark session
         try:
             sf_session.close()
         except Exception:
