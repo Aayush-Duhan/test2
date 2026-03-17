@@ -12,40 +12,39 @@ export interface RepoFetchedFile {
   size: number;
 }
 
-export interface CodeHubRepositoryOption {
-  id?: number | string | null;
+export interface GitHubRepositoryOption {
+  id?: number | null;
   name: string;
   visibility?: string | null;
-  technology?: string | null;
-  template?: string | null;
-  topics?: string[];
 }
 
-export interface CodeHubBranchOption {
+export interface GitHubBranchOption {
   name: string;
   isDefault: boolean;
 }
 
-export interface CodeHubImportState {
-  offeringName: string;
-  offeringId: string;
-  teamName: string;
-  repositories: CodeHubRepositoryOption[];
+export interface GitHubImportState {
+  token: string;
+  org: string;
+  repositories: GitHubRepositoryOption[];
   selectedRepositoryName: string;
-  availableBranches: CodeHubBranchOption[];
+  availableBranches: GitHubBranchOption[];
   branch: string;
   tree: RepoTreeEntry[];
   truncated: boolean;
   defaultBranch: string;
   selectedPaths: Set<string>;
   fetchedFiles: RepoFetchedFile[];
-  isLoadingOffering: boolean;
+  isValidatingToken: boolean;
+  isLoadingRepos: boolean;
   isLoadingBranches: boolean;
   isLoadingTree: boolean;
   isLoadingFiles: boolean;
   error: string | null;
   warning: string | null;
+  ssoUrl: string | null;
   searchQuery: string;
+  hasMore: boolean;
 }
 
 interface FetchFilesResult {
@@ -53,11 +52,53 @@ interface FetchFilesResult {
   errors?: string[];
 }
 
-function createInitialState(): CodeHubImportState {
+const STORAGE_KEY = "gh_enterprise_pat";
+const ORG_STORAGE_KEY = "gh_enterprise_org";
+
+function loadPersistedToken(): string {
+  try {
+    return sessionStorage.getItem(STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function loadPersistedOrg(): string {
+  try {
+    return sessionStorage.getItem(ORG_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function persistToken(token: string) {
+  try {
+    if (token) {
+      sessionStorage.setItem(STORAGE_KEY, token);
+    } else {
+      sessionStorage.removeItem(STORAGE_KEY);
+    }
+  } catch {
+    // SSR or storage unavailable
+  }
+}
+
+function persistOrg(org: string) {
+  try {
+    if (org) {
+      sessionStorage.setItem(ORG_STORAGE_KEY, org);
+    } else {
+      sessionStorage.removeItem(ORG_STORAGE_KEY);
+    }
+  } catch {
+    // SSR or storage unavailable
+  }
+}
+
+function createInitialState(): GitHubImportState {
   return {
-    offeringName: "",
-    offeringId: "",
-    teamName: "",
+    token: "",
+    org: "",
     repositories: [],
     selectedRepositoryName: "",
     availableBranches: [],
@@ -67,13 +108,16 @@ function createInitialState(): CodeHubImportState {
     defaultBranch: "",
     selectedPaths: new Set(),
     fetchedFiles: [],
-    isLoadingOffering: false,
+    isValidatingToken: false,
+    isLoadingRepos: false,
     isLoadingBranches: false,
     isLoadingTree: false,
     isLoadingFiles: false,
     error: null,
     warning: null,
+    ssoUrl: null,
     searchQuery: "",
+    hasMore: false,
   };
 }
 
@@ -84,56 +128,72 @@ function notify() {
   listeners.forEach((callback) => callback());
 }
 
-function getSelectedRepository(): CodeHubRepositoryOption | null {
-  return (
-    state.repositories.find((repository) => repository.name === state.selectedRepositoryName) ??
-    null
-  );
+function handleSsoError(data: Record<string, unknown> | null): boolean {
+  const ssoUrl = typeof data?.ssoUrl === "string" ? data.ssoUrl : null;
+  if (ssoUrl) {
+    state = {
+      ...state,
+      error: typeof data?.error === "string" ? data.error : "SSO authorization required.",
+      ssoUrl,
+    };
+    notify();
+    return true;
+  }
+  return false;
 }
 
-export function getCodeHubImportState(): CodeHubImportState {
+export function getGitHubImportState(): GitHubImportState {
   return state;
 }
 
-export function subscribeCodeHubImport(callback: () => void): () => void {
+export function subscribeGitHubImport(callback: () => void): () => void {
   listeners.add(callback);
   return () => listeners.delete(callback);
 }
 
-export function setOfferingName(offeringName: string) {
+export function setToken(token: string) {
   state = {
     ...state,
-    offeringName,
+    token,
     error: null,
-    warning: null,
+    ssoUrl: null,
   };
+  persistToken(token);
+  notify();
+}
+
+export function setOrg(org: string) {
+  state = {
+    ...state,
+    org,
+    error: null,
+    ssoUrl: null,
+  };
+  persistOrg(org);
   notify();
 }
 
 export function setBranch(branch: string) {
-  state = {
-    ...state,
-    branch,
-    error: null,
-  };
+  state = { ...state, branch, error: null };
   notify();
 }
 
 export function setSearchQuery(query: string) {
-  state = {
-    ...state,
-    searchQuery: query,
-  };
+  state = { ...state, searchQuery: query };
   notify();
 }
 
 export function dismissWarning() {
-  state = {
-    ...state,
-    warning: null,
-  };
+  state = { ...state, warning: null };
   notify();
 }
+
+export function dismissSso() {
+  state = { ...state, ssoUrl: null };
+  notify();
+}
+
+export const dismissSsoNotice = dismissSso;
 
 export function toggleFile(path: string) {
   const next = new Set(state.selectedPaths);
@@ -142,41 +202,33 @@ export function toggleFile(path: string) {
   } else {
     next.add(path);
   }
-
-  state = {
-    ...state,
-    selectedPaths: next,
-  };
+  state = { ...state, selectedPaths: next };
   notify();
 }
 
 export function selectAllVisible(paths: string[]) {
   const next = new Set(state.selectedPaths);
   for (const path of paths) next.add(path);
-
-  state = {
-    ...state,
-    selectedPaths: next,
-  };
+  state = { ...state, selectedPaths: next };
   notify();
 }
 
 export function deselectAllVisible(paths: string[]) {
   const next = new Set(state.selectedPaths);
   for (const path of paths) next.delete(path);
+  state = { ...state, selectedPaths: next };
+  notify();
+}
 
-  state = {
-    ...state,
-    selectedPaths: next,
-  };
+export function clearStoredCredentials() {
+  persistToken("");
+  persistOrg("");
+  state = createInitialState();
   notify();
 }
 
 async function fetchBranchesForRepository(repositoryName: string) {
-  const repository =
-    state.repositories.find((entry) => entry.name === repositoryName) ?? null;
-
-  if (!state.offeringId || !repository) return;
+  if (!state.token || !state.org || !repositoryName) return;
 
   state = {
     ...state,
@@ -186,22 +238,28 @@ async function fetchBranchesForRepository(repositoryName: string) {
     defaultBranch: "",
     warning: null,
     error: null,
+    ssoUrl: null,
   };
   notify();
 
   try {
-    const response = await fetch("/api/codehub/branches", {
+    const response = await fetch("/api/github/branches", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        offeringId: state.offeringId,
-        repositoryName: repository.name,
-        repositoryId: repository.id ?? undefined,
+        token: state.token,
+        org: state.org,
+        repositoryName,
       }),
     });
 
     const data = await response.json().catch(() => null);
     if (!response.ok) {
+      if (handleSsoError(data)) {
+        state = { ...state, isLoadingBranches: false };
+        notify();
+        return;
+      }
       state = {
         ...state,
         isLoadingBranches: false,
@@ -215,7 +273,7 @@ async function fetchBranchesForRepository(repositoryName: string) {
     }
 
     const availableBranches = Array.isArray(data?.branches)
-      ? (data.branches as CodeHubBranchOption[])
+      ? (data.branches as GitHubBranchOption[])
       : [];
     const defaultBranch =
       typeof data?.defaultBranch === "string" ? data.defaultBranch : "";
@@ -242,24 +300,27 @@ async function fetchBranchesForRepository(repositoryName: string) {
   }
 }
 
-export async function fetchOffering() {
-  const offeringName = state.offeringName.trim();
-  if (!offeringName) {
-    state = {
-      ...state,
-      error: "Please enter an offering name.",
-    };
+export async function fetchRepositories() {
+  const token = state.token.trim();
+  const org = state.org.trim();
+
+  if (!token) {
+    state = { ...state, error: "Please enter a GitHub Personal Access Token." };
+    notify();
+    return;
+  }
+  if (!org) {
+    state = { ...state, error: "Please enter a GitHub organization name." };
     notify();
     return;
   }
 
   state = {
     ...state,
-    isLoadingOffering: true,
+    isLoadingRepos: true,
     error: null,
     warning: null,
-    offeringId: "",
-    teamName: "",
+    ssoUrl: null,
     repositories: [],
     selectedRepositoryName: "",
     availableBranches: [],
@@ -273,39 +334,43 @@ export async function fetchOffering() {
   notify();
 
   try {
-    const response = await fetch("/api/codehub/offering", {
+    const response = await fetch("/api/github/repos", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ offeringName }),
+      body: JSON.stringify({ token, org }),
     });
 
     const data = await response.json().catch(() => null);
     if (!response.ok) {
+      if (handleSsoError(data)) {
+        state = { ...state, isLoadingRepos: false };
+        notify();
+        return;
+      }
       state = {
         ...state,
-        isLoadingOffering: false,
-        error: data?.error ?? "Failed to load offering.",
+        isLoadingRepos: false,
+        error: data?.error ?? "Failed to load repositories.",
       };
       notify();
       return;
     }
 
     const repositories = Array.isArray(data?.repositories)
-      ? (data.repositories as CodeHubRepositoryOption[])
+      ? (data.repositories as GitHubRepositoryOption[])
       : [];
     const selectedRepositoryName =
       repositories.length === 1 ? repositories[0].name : "";
 
     state = {
       ...state,
-      isLoadingOffering: false,
-      offeringId: typeof data?.offeringId === "string" ? data.offeringId : "",
-      teamName: typeof data?.teamName === "string" ? data.teamName : offeringName,
+      isLoadingRepos: false,
       repositories,
       selectedRepositoryName,
+      hasMore: data?.hasMore === true,
       warning:
         repositories.length === 0
-          ? "This offering does not have any repositories yet."
+          ? "This organization does not have any accessible repositories."
           : null,
     };
     notify();
@@ -316,8 +381,8 @@ export async function fetchOffering() {
   } catch {
     state = {
       ...state,
-      isLoadingOffering: false,
-      error: "Network error while loading the offering.",
+      isLoadingRepos: false,
+      error: "Network error while loading repositories.",
     };
     notify();
   }
@@ -325,7 +390,7 @@ export async function fetchOffering() {
 
 export async function selectRepository(repositoryName: string) {
   const nextRepository =
-    state.repositories.find((repository) => repository.name === repositoryName) ?? null;
+    state.repositories.find((r) => r.name === repositoryName) ?? null;
 
   state = {
     ...state,
@@ -339,6 +404,7 @@ export async function selectRepository(repositoryName: string) {
     fetchedFiles: [],
     error: null,
     warning: null,
+    ssoUrl: null,
   };
   notify();
 
@@ -348,11 +414,10 @@ export async function selectRepository(repositoryName: string) {
 }
 
 export async function fetchTree() {
-  const repository = getSelectedRepository();
-  if (!state.offeringId || !repository) {
+  if (!state.token || !state.org || !state.selectedRepositoryName) {
     state = {
       ...state,
-      error: "Please load an offering and select a repository.",
+      error: "Please connect and select a repository.",
     };
     notify();
     return;
@@ -362,7 +427,7 @@ export async function fetchTree() {
     ...state,
     isLoadingTree: true,
     error: null,
-    warning: state.warning,
+    ssoUrl: null,
     tree: [],
     truncated: false,
     selectedPaths: new Set(),
@@ -371,19 +436,24 @@ export async function fetchTree() {
   notify();
 
   try {
-    const response = await fetch("/api/codehub/tree", {
+    const response = await fetch("/api/github/tree", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        offeringId: state.offeringId,
-        repositoryName: repository.name,
-        repositoryId: repository.id ?? undefined,
+        token: state.token,
+        org: state.org,
+        repositoryName: state.selectedRepositoryName,
         branch: state.branch || undefined,
       }),
     });
 
     const data = await response.json().catch(() => null);
     if (!response.ok) {
+      if (handleSsoError(data)) {
+        state = { ...state, isLoadingTree: false };
+        notify();
+        return;
+      }
       state = {
         ...state,
         isLoadingTree: false,
@@ -416,8 +486,7 @@ export async function fetchTree() {
 }
 
 export async function fetchSelectedFiles(): Promise<FetchFilesResult> {
-  const repository = getSelectedRepository();
-  if (!state.offeringId || !repository || state.selectedPaths.size === 0) {
+  if (!state.token || !state.org || !state.selectedRepositoryName || state.selectedPaths.size === 0) {
     return { files: [] };
   }
 
@@ -430,17 +499,18 @@ export async function fetchSelectedFiles(): Promise<FetchFilesResult> {
     isLoadingFiles: true,
     error: null,
     warning: null,
+    ssoUrl: null,
   };
   notify();
 
   try {
-    const response = await fetch("/api/codehub/files", {
+    const response = await fetch("/api/github/files", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        offeringId: state.offeringId,
-        repositoryName: repository.name,
-        repositoryId: repository.id ?? undefined,
+        token: state.token,
+        org: state.org,
+        repositoryName: state.selectedRepositoryName,
         branch: state.branch || state.defaultBranch || undefined,
         files: filesToFetch,
       }),
@@ -448,6 +518,11 @@ export async function fetchSelectedFiles(): Promise<FetchFilesResult> {
 
     const data = await response.json().catch(() => null);
     if (!response.ok) {
+      if (handleSsoError(data)) {
+        state = { ...state, isLoadingFiles: false };
+        notify();
+        return { files: [] };
+      }
       state = {
         ...state,
         isLoadingFiles: false,
@@ -487,8 +562,10 @@ export async function fetchSelectedFiles(): Promise<FetchFilesResult> {
   }
 }
 
-export function resetCodeHubImport() {
-  state = createInitialState();
+export function resetGitHubImport() {
+  const token = loadPersistedToken();
+  const org = loadPersistedOrg();
+  state = { ...createInitialState(), token, org };
   notify();
 }
 
@@ -512,12 +589,12 @@ export function getFilteredTree(extensionFilter?: string[]): RepoTreeEntry[] {
   return filtered;
 }
 
-export function useCodeHubImportState(): CodeHubImportState {
-  const [current, setCurrent] = React.useState<CodeHubImportState>(getCodeHubImportState);
+export function useGitHubImportState(): GitHubImportState {
+  const [current, setCurrent] = React.useState<GitHubImportState>(getGitHubImportState);
 
   React.useEffect(() => {
-    return subscribeCodeHubImport(() => {
-      setCurrent(getCodeHubImportState());
+    return subscribeGitHubImport(() => {
+      setCurrent(getGitHubImportState());
     });
   }, []);
 

@@ -37,19 +37,27 @@ EXECUTION_TOKEN=local-dev-token
 PYTHON_EXECUTION_URL=http://127.0.0.1:8090
 ```
 
-## CodeHub Enterprise Import
+## GitHub Enterprise Import (PAT + SSO)
 
-The setup wizard imports GitHub Enterprise repositories through CodeHub. Configure these server-side variables before using the import modal:
+The setup wizard can import source files and schema mappings directly from GitHub Enterprise repositories. Users authenticate with a **Personal Access Token (classic)** that has `repo` scope.
+
+### SSO / SAML
+
+If your GitHub organization enforces SAML single sign-on, each user must **authorize their PAT for SSO** before it can access that org's repositories. When the API detects an unauthorized token, the UI surfaces a direct link to the GitHub SSO authorization page. See [Authorizing a PAT for SSO](https://docs.github.com/en/enterprise-cloud@latest/authentication/authenticating-with-single-sign-on/authorizing-a-personal-access-token-for-use-with-single-sign-on) for details.
+
+### Token persistence
+
+PATs and the selected organization name are stored in the browser's `sessionStorage` so users do not have to re-enter them each time the import modal opens. The token is cleared when the browser tab closes, or the user can click **Disconnect** inside the modal to clear it manually.
+
+### Server-side configuration
+
+No server-side secrets are required. The PAT is sent per-request from the browser to the Next.js API routes (`/api/github/repos`, `/api/github/branches`, `/api/github/tree`, `/api/github/files`), which forward it to the GitHub API.
+
+If your GitHub Enterprise Server uses a custom API base URL (not `https://api.github.com`), set the following in `.env`:
 
 ```bash
-CODEHUB_API_BASE_URL=https://api.eyfabric.ey.com/codehub/gh-emu-api-v2
-CODEHUB_TENANT_ID=5b973f99-77df-4beb-b27d-aa0c70b8482c
-CODEHUB_CLIENT_ID=<service-principal-client-id>
-CODEHUB_CLIENT_SECRET=<service-principal-client-secret>
-CODEHUB_SCOPE=acbe03ed-0571-4765-8e24-9794730d5081/.default
+GITHUB_ENTERPRISE_API_BASE_URL=https://github.example.com/api/v3
 ```
-
-Optional endpoint overrides are available in [.env.example](C:/Users/tanma/Downloads/ui/ui/.env.example) if your CodeHub read APIs use different branch/tree/file paths than the default templates.
 
 ## Learn More
 

@@ -16,42 +16,51 @@ import {
   FolderGit2,
   GitBranch,
   Building2,
+  KeyRound,
+  Eye,
+  EyeOff,
+  ExternalLink,
+  LogOut,
 } from "lucide-react";
 import {
-  useCodeHubImportState,
-  setOfferingName,
+  useGitHubImportState,
+  setOrg,
+  setToken,
   setBranch,
   setSearchQuery,
   toggleFile,
   selectAllVisible,
   deselectAllVisible,
-  fetchOffering,
+  fetchRepositories,
   selectRepository,
   fetchTree,
   fetchSelectedFiles,
-  resetCodeHubImport,
+  resetGitHubImport,
   dismissWarning,
+  dismissSso,
+  clearStoredCredentials,
   getFilteredTree,
   type RepoFetchedFile,
-} from "@/lib/codehub-store";
+} from "@/lib/github-import-store";
 import type { WizardFile } from "@/lib/wizard-store";
 
-export type CodeHubImportMode = "source" | "mapping";
+export type GitHubImportMode = "source" | "mapping";
 
-interface CodeHubImportModalProps {
-  mode: CodeHubImportMode;
+interface GitHubImportModalProps {
+  mode: GitHubImportMode;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onImport: (files: WizardFile[]) => void;
 }
 
-export function CodeHubImportModal({
+export function GitHubImportModal({
   mode,
   open,
   onOpenChange,
   onImport,
-}: CodeHubImportModalProps) {
-  const importState = useCodeHubImportState();
+}: GitHubImportModalProps) {
+  const importState = useGitHubImportState();
+  const [showToken, setShowToken] = React.useState(false);
 
   const extensionFilter = React.useMemo(
     () => (mode === "source" ? undefined : ["csv", "json"]),
@@ -71,12 +80,12 @@ export function CodeHubImportModal({
 
   React.useEffect(() => {
     if (open) {
-      resetCodeHubImport();
+      resetGitHubImport();
     }
   }, [open]);
 
-  const handleLoadOffering = async () => {
-    await fetchOffering();
+  const handleConnect = async () => {
+    await fetchRepositories();
   };
 
   const handleLoadRepository = async () => {
@@ -111,6 +120,10 @@ export function CodeHubImportModal({
     }
   };
 
+  const handleDisconnect = () => {
+    clearStoredCredentials();
+  };
+
   const subtitle =
     mode === "source"
       ? "Select source files from GitHub Enterprise"
@@ -118,6 +131,7 @@ export function CodeHubImportModal({
 
   const hasTree = importState.tree.length > 0;
   const hasRepositories = importState.repositories.length > 0;
+  const isConnected = hasRepositories;
   const showBranchSelector =
     importState.isLoadingBranches || importState.availableBranches.length > 0;
 
@@ -134,60 +148,158 @@ export function CodeHubImportModal({
               </Dialog.Title>
               <span className="text-xs text-neutral-400">{subtitle}</span>
             </div>
-            <Dialog.Close className="rounded p-1.5 text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-100">
-              <X className="h-4 w-4" />
-            </Dialog.Close>
+            <div className="flex items-center gap-2">
+              {isConnected && (
+                <button
+                  type="button"
+                  onClick={handleDisconnect}
+                  className="flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-100"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                  Disconnect
+                </button>
+              )}
+              <Dialog.Close className="rounded p-1.5 text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-100">
+                <X className="h-4 w-4" />
+              </Dialog.Close>
+            </div>
           </header>
 
           <div className="flex flex-1 overflow-hidden">
             <aside className="flex w-80 shrink-0 flex-col border-r border-neutral-800 bg-[#0e0e0e]">
               <div className="flex-1 space-y-5 overflow-y-auto p-5 scrollbar-dark">
+                {/* PAT input */}
                 <div className="space-y-2">
                   <label className="block text-xs font-medium uppercase tracking-wider text-neutral-400">
-                    Offering name
+                    Personal Access Token
                   </label>
-                  <input
-                    type="text"
-                    value={importState.offeringName}
-                    onChange={(event) => setOfferingName(event.target.value)}
-                    placeholder="demo-test"
-                    className="w-full rounded border border-neutral-700 bg-transparent px-3 py-2 text-sm text-neutral-100 placeholder-neutral-500 outline-none transition-colors focus:border-neutral-500"
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && importState.offeringName.trim()) {
-                        void handleLoadOffering();
-                      }
-                    }}
-                  />
+                  <div className="relative">
+                    <KeyRound className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+                    <input
+                      type={showToken ? "text" : "password"}
+                      value={importState.token}
+                      onChange={(event) => setToken(event.target.value)}
+                      placeholder="ghp_xxxxxxxxxxxx"
+                      disabled={isConnected}
+                      className="w-full rounded border border-neutral-700 bg-transparent py-2 pl-9 pr-10 text-sm text-neutral-100 placeholder-neutral-500 outline-none transition-colors focus:border-neutral-500 disabled:opacity-50"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowToken((v) => !v)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-neutral-500 transition-colors hover:text-neutral-200"
+                    >
+                      {showToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </button>
+                  </div>
+                  <p className="text-[10px] leading-relaxed text-neutral-500">
+                    Classic PAT with <code className="text-neutral-400">repo</code> scope.
+                    Must be{" "}
+                    <a
+                      href="https://docs.github.com/en/enterprise-cloud@latest/authentication/authenticating-with-single-sign-on/authorizing-a-personal-access-token-for-use-with-single-sign-on"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="underline text-neutral-400 hover:text-neutral-200"
+                    >
+                      authorized for SSO
+                    </a>{" "}
+                    if your org uses SAML.
+                  </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => void handleLoadOffering()}
-                  disabled={!importState.offeringName.trim() || importState.isLoadingOffering}
-                  className="flex w-full items-center justify-center gap-2 rounded border border-neutral-700 bg-neutral-800 px-4 py-2.5 text-sm font-medium text-neutral-100 transition-colors hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {importState.isLoadingOffering ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Building2 className="h-4 w-4" />
-                  )}
-                  {importState.isLoadingOffering ? "Loading..." : "Load offering"}
-                </button>
+                {/* Org input */}
+                <div className="space-y-2">
+                  <label className="block text-xs font-medium uppercase tracking-wider text-neutral-400">
+                    Organization
+                  </label>
+                  <div className="relative">
+                    <Building2 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+                    <input
+                      type="text"
+                      value={importState.org}
+                      onChange={(event) => setOrg(event.target.value)}
+                      placeholder="my-enterprise-org"
+                      disabled={isConnected}
+                      className="w-full rounded border border-neutral-700 bg-transparent py-2 pl-9 pr-3 text-sm text-neutral-100 placeholder-neutral-500 outline-none transition-colors focus:border-neutral-500 disabled:opacity-50"
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && importState.token.trim() && importState.org.trim() && !isConnected) {
+                          void handleConnect();
+                        }
+                      }}
+                    />
+                  </div>
+                </div>
 
-                {importState.offeringId && (
+                {/* Connect button */}
+                {!isConnected && (
+                  <button
+                    type="button"
+                    onClick={() => void handleConnect()}
+                    disabled={
+                      !importState.token.trim() ||
+                      !importState.org.trim() ||
+                      importState.isLoadingRepos
+                    }
+                    className="flex w-full items-center justify-center gap-2 rounded border border-neutral-700 bg-neutral-800 px-4 py-2.5 text-sm font-medium text-neutral-100 transition-colors hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {importState.isLoadingRepos ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <ArrowRight className="h-4 w-4" />
+                    )}
+                    {importState.isLoadingRepos ? "Connecting..." : "Connect"}
+                  </button>
+                )}
+
+                {/* Connected summary */}
+                {isConnected && (
                   <div className="rounded border border-neutral-800 bg-neutral-900/70 px-3 py-2.5">
                     <p className="text-[11px] uppercase tracking-wider text-neutral-500">
-                      Offering
+                      Connected
                     </p>
                     <p className="mt-1 text-sm text-neutral-100">
-                      {importState.teamName || importState.offeringName}
+                      {importState.org}
                     </p>
                     <p className="mt-1 text-xs text-neutral-500">
                       {importState.repositories.length} repos available
+                      {importState.hasMore ? " (showing first 100)" : ""}
                     </p>
                   </div>
                 )}
 
+                {/* SSO authorization banner */}
+                {importState.ssoUrl && (
+                  <div className="rounded border border-amber-900/50 bg-amber-950/30 px-3 py-2.5">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
+                      <div className="flex-1 space-y-2">
+                        <p className="text-xs leading-relaxed text-amber-300/90">
+                          Your PAT needs SSO authorization for this organization.
+                        </p>
+                        <a
+                          href={importState.ssoUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 rounded border border-amber-300/40 px-2.5 py-1 text-xs font-medium text-amber-100 transition-colors hover:bg-amber-500/20"
+                        >
+                          <ExternalLink className="h-3 w-3" />
+                          Authorize PAT for SSO
+                        </a>
+                        <p className="text-[10px] text-amber-300/60">
+                          After authorizing, click Connect again.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={dismissSso}
+                        className="text-[10px] uppercase tracking-wider text-amber-200/80 transition-colors hover:text-amber-100"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Repository selector */}
                 {hasRepositories && (
                   <div className="space-y-2">
                     <label className="block text-xs font-medium uppercase tracking-wider text-neutral-400">
@@ -218,6 +330,7 @@ export function CodeHubImportModal({
                   </div>
                 )}
 
+                {/* Branch selector */}
                 {showBranchSelector && (
                   <div className="space-y-2">
                     <label className="block text-xs font-medium uppercase tracking-wider text-neutral-400">
@@ -256,25 +369,28 @@ export function CodeHubImportModal({
                   </div>
                 )}
 
-                <button
-                  type="button"
-                  onClick={() => void handleLoadRepository()}
-                  disabled={
-                    !importState.offeringId ||
-                    !importState.selectedRepositoryName ||
-                    importState.isLoadingTree
-                  }
-                  className="flex w-full items-center justify-center gap-2 rounded border border-neutral-700 bg-neutral-800 px-4 py-2.5 text-sm font-medium text-neutral-100 transition-colors hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {importState.isLoadingTree ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <ArrowRight className="h-4 w-4" />
-                  )}
-                  {importState.isLoadingTree ? "Loading..." : "Load repository"}
-                </button>
+                {/* Load repository button */}
+                {isConnected && (
+                  <button
+                    type="button"
+                    onClick={() => void handleLoadRepository()}
+                    disabled={
+                      !importState.selectedRepositoryName ||
+                      importState.isLoadingTree
+                    }
+                    className="flex w-full items-center justify-center gap-2 rounded border border-neutral-700 bg-neutral-800 px-4 py-2.5 text-sm font-medium text-neutral-100 transition-colors hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {importState.isLoadingTree ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <ArrowRight className="h-4 w-4" />
+                    )}
+                    {importState.isLoadingTree ? "Loading..." : "Load repository"}
+                  </button>
+                )}
 
-                {importState.error && (
+                {/* Error display */}
+                {importState.error && !importState.ssoUrl && (
                   <div className="flex items-start gap-2 rounded border border-red-900/50 bg-red-950/30 px-3 py-2.5">
                     <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" />
                     <p className="text-xs leading-relaxed text-red-300">
@@ -283,6 +399,7 @@ export function CodeHubImportModal({
                   </div>
                 )}
 
+                {/* Warning display */}
                 {importState.warning && (
                   <div className="rounded border border-amber-900/50 bg-amber-950/30 px-3 py-2.5">
                     <div className="flex items-start gap-2">
@@ -365,11 +482,11 @@ export function CodeHubImportModal({
                   <div className="space-y-2 text-center">
                     <Github className="mx-auto h-8 w-8 text-neutral-600" />
                     <p className="text-sm text-neutral-400">
-                      {importState.offeringId
+                      {isConnected
                         ? hasRepositories
                           ? "Select a repo, choose a branch if needed, and load it to browse files."
-                          : "This offering does not have repositories to import from."
-                        : "Enter an offering name to browse repositories from GitHub Enterprise."}
+                          : "This organization does not have accessible repositories."
+                        : "Enter your PAT and organization name to connect to GitHub Enterprise."}
                     </p>
                   </div>
                 </div>

@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { ChevronLeft, ChevronRight, Check, Database, FileText, GitBranch, CheckCircle2, Code2, KeyRound, Github } from "lucide-react";
-import { CodeHubImportModal } from "@/components/ui/codehub-import-modal";
+import { GitHubImportModal } from "@/components/ui/github-import-modal";
 import {
   useWizardState,
   getVisibleWizardSteps,
@@ -221,7 +221,7 @@ const FilesStep = React.memo(function FilesStep() {
         Import from GitHub Enterprise
       </button>
 
-      <CodeHubImportModal
+      <GitHubImportModal
         mode="source"
         open={repoModalOpen}
         onOpenChange={setRepoModalOpen}
@@ -352,7 +352,7 @@ const MappingStep = React.memo(function MappingStep() {
         Import from GitHub Enterprise
       </button>
 
-      <CodeHubImportModal
+      <GitHubImportModal
         mode="mapping"
         open={repoModalOpen}
         onOpenChange={setRepoModalOpen}
