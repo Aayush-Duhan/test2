@@ -32,6 +32,7 @@ interface PythonRunDetail {
   lastExecutedFileIndex?: number;
   selfHealIteration?: number;
   messages?: unknown[];
+  streamParts?: unknown[];
 }
 
 export async function GET(_: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -70,6 +71,7 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
         lastExecutedFileIndex: run.lastExecutedFileIndex ?? -1,
         selfHealIteration: run.selfHealIteration ?? 0,
         messages: run.messages ?? [],
+        streamParts: run.streamParts ?? [],
       }),
       "Run lookup failed"
     );

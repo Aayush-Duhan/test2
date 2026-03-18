@@ -163,7 +163,7 @@ def _append_stream_part_file(run: RunRecord, part: dict[str, Any]) -> None:
 
 def append_stream_part(run: RunRecord, part: dict[str, Any]) -> None:
     timestamp = now_iso()
-    payload = {**part, "ts": timestamp}
+    payload = dict(part)
     with RUN_LOCK:
         run.streamParts.append(payload)
         run.updatedAt = timestamp
@@ -254,7 +254,7 @@ def append_terminal_output(
     if step_id in STEP_LABELS:
         payload["stepId"] = step_id
         payload["stepLabel"] = STEP_LABELS[step_id]
-    append_stream_part(run, create_data_part("terminal-progress", payload))
+    append_stream_part(run, create_data_part("terminal-progress", payload, transient=True))
 
 
 def send_terminal_data(run: RunRecord, raw_chunk: str) -> None:
@@ -310,10 +310,10 @@ def append_tool_call_part(
 ) -> str:
     resolved_tool_call_id = tool_call_id or generate_tool_call_id()
     input_text = json.dumps(tool_input, ensure_ascii=False, default=str)
-    append_stream_part(run, create_tool_input_start_part(resolved_tool_call_id, tool_name))
+    append_stream_part(run, create_tool_input_start_part(resolved_tool_call_id, tool_name, dynamic=True))
     if input_text:
         append_stream_part(run, create_tool_input_delta_part(resolved_tool_call_id, input_text))
-    append_stream_part(run, create_tool_input_available_part(resolved_tool_call_id, tool_name, tool_input))
+    append_stream_part(run, create_tool_input_available_part(resolved_tool_call_id, tool_name, tool_input, dynamic=True))
     append_stream_part(run, create_tool_output_available_part(resolved_tool_call_id, output))
     return resolved_tool_call_id
 
@@ -428,6 +428,7 @@ def append_step_status_part(run: RunRecord, step_id: str, status: str) -> None:
                 "label": STEP_LABELS.get(step_id, step_id),
                 "status": status,
             },
+            transient=True,
         ),
     )
 
@@ -446,6 +447,7 @@ def append_run_status_part(run: RunRecord, status: str, error: str | None = None
                 "lastExecutedFileIndex": run.lastExecutedFileIndex,
                 "missingObjects": list(run.missingObjects),
             },
+            transient=True,
         ),
     )
 
@@ -473,6 +475,7 @@ def append_run_sync_part(run: RunRecord) -> None:
                 "missingObjects": list(run.missingObjects),
                 "executionErrors": list(run.executionErrors),
             },
+            transient=True,
         ),
     )
 

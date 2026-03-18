@@ -1,3 +1,4 @@
+import type { UIMessage } from "ai";
 import type { StepState } from "@/lib/migration-types";
 
 export type ExecuteStatementEvent = {
@@ -94,6 +95,22 @@ export type TerminalProgressDataPart = {
   stepLabel?: string;
 };
 
+export type StreamCursorDataPart = {
+  nextPartIndex: number;
+};
+
+export type RunChatDataTypes = {
+  "run-sync": RunSyncDataPart;
+  "run-status": RunStatusDataPart;
+  "step-status": StepStatusDataPart;
+  "sql-statement": ExecuteStatementEvent;
+  "sql-error": ExecuteErrorEvent;
+  "terminal-progress": TerminalProgressDataPart;
+  "stream-cursor": StreamCursorDataPart;
+};
+
+export type RunUiMessage = UIMessage<never, RunChatDataTypes>;
+
 export type RunStreamPart =
   | { type: "start"; messageId: string }
   | { type: "text-start"; id: string }
@@ -114,7 +131,8 @@ export type RunStreamPart =
   | { type: "data-step-status"; data: StepStatusDataPart }
   | { type: "data-sql-statement"; data: ExecuteStatementEvent }
   | { type: "data-sql-error"; data: ExecuteErrorEvent }
-  | { type: "data-terminal-progress"; data: TerminalProgressDataPart };
+  | { type: "data-terminal-progress"; data: TerminalProgressDataPart }
+  | { type: "data-stream-cursor"; data: StreamCursorDataPart; transient?: boolean };
 
 export const STEP_BLUEPRINT: StepState[] = [
   { id: "init_project", label: "Initialize project", status: "pending" },

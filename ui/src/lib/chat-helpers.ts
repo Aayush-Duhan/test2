@@ -18,7 +18,7 @@ export const isActive = (s: string) =>
 
 /* ── Message factories ───────────────────────────────────── */
 
-export function makeMessage(
+function makeMessage(
   role: ChatMessageRole,
   content: string,
   kind: ChatMessageKind = "agent_response",
@@ -40,10 +40,6 @@ export function makeMessage(
  * Creates a "thinking" message — visually distinct shimmer bubble used
  * to surface LLM reasoning during self-heal and other analysis steps.
  */
-export function makeThinkingMessage(content: string): ChatMessage {
-  return makeMessage("agent", content, "agent_thinking");
-}
-
 /* ── Step / Task merging ─────────────────────────────────── */
 
 export function mergeSteps(steps?: StepState[]): StepState[] {

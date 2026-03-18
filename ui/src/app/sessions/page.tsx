@@ -1,6 +1,8 @@
 "use client";
 
 import * as React from "react";
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
 import { useParams, useRouter } from "next/navigation";
 import { v4 as uuidv4 } from "uuid";
 import { SidebarProvider } from "@/components/ui/sidebar";
@@ -11,37 +13,42 @@ import { workbenchStore } from "@/lib/workbench-store";
 import type { StepState } from "@/lib/migration-types";
 import {
   STEP_BLUEPRINT,
-  type ChatMessage,
   type ExecuteErrorEvent,
   type ExecuteStatementEvent,
-  type RunStreamPart,
+  type RunUiMessage,
 } from "@/lib/chat-types";
 import {
   buildTasks,
   flattenExecutionLog,
   isActive,
-  makeMessage,
-  makeSqlErrorMessage,
-  makeSqlStatementMessage,
   mergeSteps,
 } from "@/lib/chat-helpers";
+import {
+  convertUiMessagesToChatMessages,
+  getLatestUserMessageText,
+  getUiMessageText,
+  hydrateUiMessagesFromSnapshotMessages,
+} from "@/lib/run-chat";
 import { getWizardState } from "@/lib/wizard-store";
 import { StreamingMessageParser } from "@/lib/runtime/message-parser";
 
-function isChatMessage(value: unknown): value is ChatMessage {
-  if (!value || typeof value !== "object") return false;
-  const row = value as Record<string, unknown>;
-  return (
-    typeof row.id === "string" &&
-    typeof row.role === "string" &&
-    typeof row.kind === "string" &&
-    typeof row.content === "string"
-  );
-}
-
-function isRunStreamPart(value: unknown): value is RunStreamPart {
-  return Boolean(value && typeof value === "object" && typeof (value as { type?: unknown }).type === "string");
-}
+type RunDetailResponse = {
+  runId: string;
+  projectId?: string;
+  sourceId?: string;
+  schemaId?: string;
+  status?: string;
+  steps?: StepState[];
+  executionLog?: unknown[];
+  executionErrors?: ExecuteErrorEvent[];
+  missingObjects?: string[];
+  requiresDdlUpload?: boolean;
+  resumeFromStage?: string;
+  lastExecutedFileIndex?: number;
+  error?: string | null;
+  messages?: unknown[];
+  streamParts?: unknown[];
+};
 
 export default function SessionsPage() {
   const router = useRouter();
@@ -60,7 +67,6 @@ export default function SessionsPage() {
   const [error, setError] = React.useState<string | null>(null);
   const [isBusy, setIsBusy] = React.useState(false);
   const [isCanceling, setIsCanceling] = React.useState(false);
-  const [messages, setMessages] = React.useState<ChatMessage[]>([]);
   const [selectedSessionId, setSelectedSessionId] = React.useState<string | null>(null);
   const [sidebarReloadKey, setSidebarReloadKey] = React.useState(0);
   const [, setExecuteStatements] = React.useState<ExecuteStatementEvent[]>([]);
@@ -69,12 +75,11 @@ export default function SessionsPage() {
   const [missingObjects, setMissingObjects] = React.useState<string[]>([]);
   const [resumeFromStage, setResumeFromStage] = React.useState("");
   const [lastExecutedFileIndex, setLastExecutedFileIndex] = React.useState(-1);
-  const [isAgentThinking, setIsAgentThinking] = React.useState(false);
+  const [initialChatMessages, setInitialChatMessages] = React.useState<RunUiMessage[]>([]);
+  const [parsedAssistantText, setParsedAssistantText] = React.useState<Map<string, string>>(new Map());
 
   const ddlFileInputRef = React.useRef<HTMLInputElement>(null);
-  const activeMessageIdRef = React.useRef<string | null>(null);
-  const toolInputRef = React.useRef<Map<string, { toolName: string; inputText: string; input?: Record<string, unknown> }>>(new Map());
-  const rawAssistantTextRef = React.useRef<Map<string, string>>(new Map());
+  const streamCursorRef = React.useRef(0);
   const parserRef = React.useRef(
     new StreamingMessageParser({
       callbacks: {
@@ -100,106 +105,26 @@ export default function SessionsPage() {
     }),
   );
 
-  const reloadSidebar = React.useCallback(() => setSidebarReloadKey((k) => k + 1), []);
+  const reloadSidebar = React.useCallback(() => setSidebarReloadKey((key) => key + 1), []);
   const tasks = React.useMemo(() => buildTasks(steps, status), [steps, status]);
 
-  const rehydrateParsedMessages = React.useCallback((nextMessages: ChatMessage[]) => {
-    parserRef.current.reset();
-    rawAssistantTextRef.current.clear();
-    workbenchStore.artifacts.set({});
-    for (const message of nextMessages) {
-      if (message.role !== "agent" || message.kind !== "agent_response") continue;
-      rawAssistantTextRef.current.set(message.id, message.content);
-      parserRef.current.parse(message.id, message.content);
-    }
-  }, []);
+  const transport = React.useMemo(() => new DefaultChatTransport<RunUiMessage>({
+    prepareSendMessagesRequest: ({ id, messages }) => ({
+      api: `/api/runs/${id}/chat`,
+      body: {
+        message: getLatestUserMessageText(messages),
+        fromPartIndex: streamCursorRef.current,
+      },
+    }),
+    prepareReconnectToStreamRequest: ({ id }) => ({
+      api: `/api/runs/${id}/chat/stream?fromPartIndex=${streamCursorRef.current}`,
+    }),
+  }), []);
 
-  const applyRunStreamPart = React.useCallback((part: RunStreamPart) => {
+  const handleStreamData = React.useCallback((part: RunUiMessage["parts"][number]) => {
     switch (part.type) {
-      case "start":
-        activeMessageIdRef.current = part.messageId;
-        rawAssistantTextRef.current.set(part.messageId, "");
-        setMessages((prev) => (
-          prev.some((message) => message.id === part.messageId)
-            ? prev
-            : [...prev, { id: part.messageId, role: "agent", kind: "agent_response", content: "" }]
-        ));
-        return;
-      case "text-start":
-        return;
-      case "text-delta": {
-        const messageId = activeMessageIdRef.current;
-        if (!messageId) return;
-        const rawSoFar = `${rawAssistantTextRef.current.get(messageId) ?? ""}${part.delta}`;
-        rawAssistantTextRef.current.set(messageId, rawSoFar);
-        const parsedDelta = parserRef.current.parse(messageId, rawSoFar);
-        setMessages((prev) => prev.map((message) => (
-          message.id === messageId
-            ? { ...message, role: "agent", kind: "agent_response", content: `${message.content}${parsedDelta}` }
-            : message
-        )));
-        return;
-      }
-      case "text-end":
-        return;
-      case "reasoning-start":
-      case "reasoning-delta":
-        setIsAgentThinking(true);
-        return;
-      case "reasoning-end":
-        setIsAgentThinking(false);
-        return;
-      case "tool-input-start":
-        toolInputRef.current.set(part.toolCallId, { toolName: part.toolName, inputText: "" });
-        setIsAgentThinking(true);
-        return;
-      case "tool-input-delta": {
-        const current = toolInputRef.current.get(part.toolCallId);
-        if (current) {
-          current.inputText += part.inputTextDelta;
-        }
-        return;
-      }
-      case "tool-input-available": {
-        const current = toolInputRef.current.get(part.toolCallId);
-        toolInputRef.current.set(part.toolCallId, {
-          toolName: part.toolName,
-          inputText: current?.inputText ?? JSON.stringify(part.input),
-          input: part.input,
-        });
-        return;
-      }
-      case "tool-output-available": {
-        const toolState = toolInputRef.current.get(part.toolCallId);
-        const output = typeof part.output === "string" ? part.output : JSON.stringify(part.output, null, 2);
-        setMessages((prev) => [
-          ...prev,
-          makeMessage(
-            "agent",
-            output,
-            "tool_result",
-          ),
-        ]);
-        if (toolState) {
-          toolInputRef.current.delete(part.toolCallId);
-        }
-        setIsAgentThinking(false);
-        return;
-      }
-      case "finish":
-        if (activeMessageIdRef.current) {
-          rawAssistantTextRef.current.delete(activeMessageIdRef.current);
-        }
-        activeMessageIdRef.current = null;
-        setIsAgentThinking(false);
-        return;
-      case "error":
-        setError(part.errorText);
-        setIsAgentThinking(false);
-        return;
-      case "abort":
-        setError(part.reason);
-        setIsAgentThinking(false);
+      case "data-stream-cursor":
+        streamCursorRef.current = part.data.nextPartIndex;
         return;
       case "data-run-sync":
         setStatus(part.data.status);
@@ -218,32 +143,26 @@ export default function SessionsPage() {
         setLastExecutedFileIndex(part.data.lastExecutedFileIndex ?? -1);
         setMissingObjects(part.data.missingObjects ?? []);
         if (!isActive(part.data.status)) {
-          setIsAgentThinking(false);
           setIsCanceling(false);
           reloadSidebar();
         }
         return;
       case "data-step-status":
-        setSteps((prev) => mergeSteps(prev.map((step) => (
+        setSteps((previous) => mergeSteps(previous.map((step) => (
           step.id === part.data.stepId ? { ...step, status: part.data.status as StepState["status"] } : step
         ))));
-        if (part.data.status === "running") {
-          setIsAgentThinking(part.data.stepId === "convert_code" || part.data.stepId === "validate");
-        }
         return;
       case "data-sql-statement":
-        setExecuteStatements((prev) => [...prev, part.data]);
-        setMessages((prev) => [...prev, makeSqlStatementMessage(part.data)]);
+        setExecuteStatements((previous) => [...previous, part.data]);
         return;
       case "data-sql-error": {
-        setExecuteErrors((prev) => [...prev, part.data]);
+        setExecuteErrors((previous) => [...previous, part.data]);
         const missing =
           (part.data.errorType ?? "").toLowerCase().includes("missing") ||
           (part.data.errorMessage ?? "").toLowerCase().includes("does not exist");
         if (missing) {
           setRequiresDdlUpload(true);
         }
-        setMessages((prev) => [...prev, makeSqlErrorMessage(part.data)]);
         return;
       }
       case "data-terminal-progress":
@@ -253,19 +172,59 @@ export default function SessionsPage() {
     }
   }, [reloadSidebar]);
 
+  const {
+    messages: chatMessages,
+    sendMessage,
+    resumeStream,
+    stop,
+    status: chatStatus,
+    error: chatError,
+  } = useChat<RunUiMessage>({
+    id: runId ?? "draft",
+    messages: initialChatMessages,
+    transport,
+    onData: handleStreamData,
+    onError: (chatStreamError) => {
+      setError(chatStreamError.message);
+    },
+  });
+
+  const transcriptMessages = React.useMemo(
+    () => convertUiMessagesToChatMessages(chatMessages, parsedAssistantText),
+    [chatMessages, parsedAssistantText],
+  );
+
+  const isAgentThinking = React.useMemo(() => {
+    if (!runId || isCanceling) {
+      return false;
+    }
+
+    if (chatStatus === "submitted" || chatStatus === "streaming") {
+      return true;
+    }
+
+    return steps.some((step) => (
+      step.status === "running" && (step.id === "convert_code" || step.id === "validate")
+    ));
+  }, [chatStatus, isCanceling, runId, steps]);
+
   const hydrateRun = React.useCallback(async (targetRunId: string) => {
     setIsBusy(true);
     setError(null);
     setIsCanceling(false);
-    parserRef.current.reset();
-    rawAssistantTextRef.current.clear();
-    const res = await fetch(`/api/runs/${targetRunId}`, { cache: "no-store" });
-    if (!res.ok) {
+
+    const response = await fetch(`/api/runs/${targetRunId}`, { cache: "no-store" });
+    if (!response.ok) {
       setError("Unable to load session");
       setIsBusy(false);
       return;
     }
-    const data = await res.json();
+
+    const data = await response.json() as RunDetailResponse;
+    const streamParts = Array.isArray(data.streamParts) ? data.streamParts : [];
+
+    streamCursorRef.current = streamParts.length;
+    setInitialChatMessages(hydrateUiMessagesFromSnapshotMessages(data.messages ?? []));
     setRunId(targetRunId);
     setSelectedSessionId(targetRunId);
     setPromptMode("chat");
@@ -280,19 +239,16 @@ export default function SessionsPage() {
     setMissingObjects(Array.isArray(data.missingObjects) ? data.missingObjects : []);
     setResumeFromStage(typeof data.resumeFromStage === "string" ? data.resumeFromStage : "");
     setLastExecutedFileIndex(typeof data.lastExecutedFileIndex === "number" ? data.lastExecutedFileIndex : -1);
-    const hydratedMessages = Array.isArray(data.messages) ? data.messages.filter(isChatMessage) : [];
-    rehydrateParsedMessages(hydratedMessages);
-    setMessages(hydratedMessages);
     setError(typeof data.error === "string" && data.error.length > 0 ? data.error : null);
-    setIsAgentThinking(false);
     setIsBusy(false);
-  }, [rehydrateParsedMessages]);
+  }, []);
 
   const reconcileRunSnapshot = React.useCallback(async (targetRunId: string) => {
     try {
-      const res = await fetch(`/api/runs/${targetRunId}`, { cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json();
+      const response = await fetch(`/api/runs/${targetRunId}`, { cache: "no-store" });
+      if (!response.ok) return;
+
+      const data = await response.json() as RunDetailResponse;
       setStatus(typeof data.status === "string" ? data.status : "idle");
       setSteps(mergeSteps(data.steps));
       setRequiresDdlUpload(Boolean(data.requiresDdlUpload));
@@ -301,13 +257,7 @@ export default function SessionsPage() {
       setLastExecutedFileIndex(typeof data.lastExecutedFileIndex === "number" ? data.lastExecutedFileIndex : -1);
       setExecuteStatements(flattenExecutionLog(data.executionLog));
       setExecuteErrors(Array.isArray(data.executionErrors) ? data.executionErrors : []);
-      if (Array.isArray(data.messages)) {
-        const hydratedMessages = data.messages.filter(isChatMessage);
-        rehydrateParsedMessages(hydratedMessages);
-        setMessages(hydratedMessages);
-      }
       if (!isActive(data.status ?? "idle")) {
-        setIsAgentThinking(false);
         setIsCanceling(false);
         reloadSidebar();
       }
@@ -315,41 +265,55 @@ export default function SessionsPage() {
     } catch {
       // best-effort
     }
-  }, [rehydrateParsedMessages, reloadSidebar]);
+  }, [reloadSidebar]);
 
-  const uploadSource = async (pid: string, f: File) => {
+  const uploadSource = async (pid: string, file: File) => {
     setIsBusy(true);
     setError(null);
-    const fd = new FormData();
-    fd.append("file", f);
-    const res = await fetch(`/api/projects/${pid}/source`, { method: "POST", body: fd });
-    if (!res.ok) {
+    const formData = new FormData();
+    formData.append("file", file);
+    const response = await fetch(`/api/projects/${pid}/source`, { method: "POST", body: formData });
+    if (!response.ok) {
       setError("Upload failed");
       setIsBusy(false);
       return;
     }
-    const data = await res.json();
+    const data = await response.json();
     setSourceId(data.sourceId);
     setIsBusy(false);
-    return data.sourceId as string;
+    return data.schemaId as string;
   };
 
-  const uploadSchema = async (pid: string, f: File) => {
+  const uploadSchema = async (pid: string, file: File) => {
     setIsBusy(true);
     setError(null);
-    const fd = new FormData();
-    fd.append("file", f);
-    const res = await fetch(`/api/projects/${pid}/schema`, { method: "POST", body: fd });
-    if (!res.ok) {
+    const formData = new FormData();
+    formData.append("file", file);
+    const response = await fetch(`/api/projects/${pid}/schema`, { method: "POST", body: formData });
+    if (!response.ok) {
       setError("Schema upload failed");
       setIsBusy(false);
       return;
     }
-    const data = await res.json();
+    const data = await response.json();
     setSchemaId(data.schemaId);
     setIsBusy(false);
-    return data.schemaId as string;
+    return data.sourceId as string;
   };
+
+  const resetRunState = React.useCallback(() => {
+    streamCursorRef.current = 0;
+    setInitialChatMessages([]);
+    setExecuteStatements([]);
+    setExecuteErrors([]);
+    setRequiresDdlUpload(false);
+    setMissingObjects([]);
+    setResumeFromStage("");
+    setLastExecutedFileIndex(-1);
+    setParsedAssistantText(new Map());
+    parserRef.current.reset();
+    workbenchStore.artifacts.set({});
+  }, []);
 
   const startRun = async (
     pid?: string,
@@ -366,40 +330,37 @@ export default function SessionsPage() {
       sfAuthenticator?: string;
     },
   ) => {
-    const activePid = pid ?? projectId;
-    const activeSid = sid ?? sourceId;
-    const activeScid = scid ?? schemaId ?? undefined;
-    if (!activePid || !activeSid) return;
+    const activeProjectId = pid ?? projectId;
+    const activeSourceId = sid ?? sourceId;
+    const activeSchemaId = scid ?? schemaId ?? undefined;
+    if (!activeProjectId || !activeSourceId) return;
 
     setIsBusy(true);
     setError(null);
     setIsCanceling(false);
     setSteps(STEP_BLUEPRINT);
-    setMessages([]);
-    setExecuteStatements([]);
-    setExecuteErrors([]);
-    parserRef.current.reset();
-    rawAssistantTextRef.current.clear();
+    resetRunState();
 
-    const res = await fetch("/api/runs", {
+    const response = await fetch("/api/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        projectId: activePid,
-        sourceId: activeSid,
-        schemaId: activeScid,
+        projectId: activeProjectId,
+        sourceId: activeSourceId,
+        schemaId: activeSchemaId,
         sourceLanguage: lang,
         ...(creds ?? {}),
       }),
     });
-    if (!res.ok) {
-      const payload = await res.json().catch(() => ({}));
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
       setError(typeof payload?.error === "string" ? payload.error : "Failed to start run");
       setIsBusy(false);
       return;
     }
 
-    const data = await res.json();
+    const data = await response.json();
     setRunId(data.runId);
     setSelectedSessionId(data.runId);
     setStatus("running");
@@ -414,26 +375,20 @@ export default function SessionsPage() {
     setIsBusy(true);
     setError(null);
     setIsCanceling(false);
-    const res = await fetch(`/api/runs/${runId}/retry`, { method: "POST" });
-    if (!res.ok) {
+
+    const response = await fetch(`/api/runs/${runId}/retry`, { method: "POST" });
+    if (!response.ok) {
       setError("Retry failed");
       setIsBusy(false);
       return;
     }
 
-    const data = await res.json();
+    const data = await response.json();
+    resetRunState();
     setRunId(data.runId);
     setSelectedSessionId(data.runId);
     setStatus("running");
     setSteps(STEP_BLUEPRINT);
-    setMessages([]);
-    setExecuteStatements([]);
-    setExecuteErrors([]);
-    setRequiresDdlUpload(false);
-    setMissingObjects([]);
-    setResumeFromStage("");
-    setLastExecutedFileIndex(-1);
-    parserRef.current.reset();
     setIsBusy(false);
     reloadSidebar();
     router.replace(`/sessions/${data.runId}`);
@@ -444,35 +399,28 @@ export default function SessionsPage() {
     setIsBusy(true);
     setError(null);
     setIsCanceling(false);
-    try {
-      const fd = new FormData();
-      fd.append("ddlFile", ddlFile);
-      fd.append("resumeFromStage", resumeFromStage || "execute_sql");
-      fd.append("lastExecutedFileIndex", String(lastExecutedFileIndex));
-      fd.append("missingObjects", JSON.stringify(missingObjects));
 
-      const res = await fetch(`/api/runs/${runId}/resume`, { method: "POST", body: fd });
-      if (!res.ok) {
-        const payload = await res.json().catch(() => ({}));
+    try {
+      const formData = new FormData();
+      formData.append("ddlFile", ddlFile);
+      formData.append("resumeFromStage", resumeFromStage || "execute_sql");
+      formData.append("lastExecutedFileIndex", String(lastExecutedFileIndex));
+      formData.append("missingObjects", JSON.stringify(missingObjects));
+
+      const response = await fetch(`/api/runs/${runId}/resume`, { method: "POST", body: formData });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
         setError(payload?.error ?? "Resume failed");
         setIsBusy(false);
         return;
       }
 
-      const data = await res.json();
+      const data = await response.json();
+      resetRunState();
       setRunId(data.runId);
       setSelectedSessionId(data.runId);
       setStatus("running");
       setSteps(STEP_BLUEPRINT);
-      setMessages([]);
-      setExecuteStatements([]);
-      setExecuteErrors([]);
-      setRequiresDdlUpload(false);
-      setMissingObjects([]);
-      setResumeFromStage("");
-      setLastExecutedFileIndex(-1);
-      parserRef.current.reset();
-      rawAssistantTextRef.current.clear();
       setIsBusy(false);
       reloadSidebar();
       router.replace(`/sessions/${data.runId}`);
@@ -501,18 +449,18 @@ export default function SessionsPage() {
     const projectName = uuidv4();
 
     try {
-      const res = await fetch("/api/projects", {
+      const response = await fetch("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: projectName, sourceLanguage: wizardLanguage }),
       });
-      if (!res.ok) {
+      if (!response.ok) {
         setError("Unable to create project");
         setIsBusy(false);
         return;
       }
 
-      const data = await res.json();
+      const data = await response.json();
       setProjectId(data.projectId);
       setPromptMode("chat");
 
@@ -532,12 +480,32 @@ export default function SessionsPage() {
       } else {
         setError("Uploads incomplete. Please retry attaching files.");
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to start migration");
+    } catch (startError) {
+      setError(startError instanceof Error ? startError.message : "Failed to start migration");
     } finally {
       setIsBusy(false);
     }
   };
+
+  React.useEffect(() => {
+    parserRef.current.reset();
+    workbenchStore.artifacts.set({});
+
+    const nextParsed = new Map<string, string>();
+    for (const message of chatMessages) {
+      if (message.role !== "assistant") continue;
+      const rawText = getUiMessageText(message);
+      if (!rawText.trim()) continue;
+      nextParsed.set(message.id, parserRef.current.parse(message.id, rawText));
+    }
+
+    setParsedAssistantText(nextParsed);
+  }, [chatMessages]);
+
+  React.useEffect(() => {
+    if (!chatError) return;
+    setError(chatError.message);
+  }, [chatError]);
 
   React.useEffect(() => {
     if (!routeRunId || routeRunId === runId) return;
@@ -553,45 +521,41 @@ export default function SessionsPage() {
   }, [runId, status, reconcileRunSnapshot]);
 
   React.useEffect(() => {
-    if (!runId || !isActive(status)) return;
-    const source = new EventSource(`/api/runs/${runId}/stream`);
+    if (!runId || !isActive(status) || chatStatus !== "ready") return;
+    void resumeStream();
+  }, [chatStatus, resumeStream, runId, status]);
 
-    source.onmessage = (event) => {
-      if (event.data === "[DONE]") {
-        setIsAgentThinking(false);
-        return;
-      }
-      try {
-        const payload = JSON.parse(event.data);
-        if (!isRunStreamPart(payload)) return;
-        applyRunStreamPart(payload);
-      } catch {
-        // ignore malformed frames
-      }
-    };
-
-    source.onerror = () => {
-      source.close();
-      void reconcileRunSnapshot(runId);
-    };
-
-    return () => source.close();
-  }, [applyRunStreamPart, reconcileRunSnapshot, runId, status]);
+  React.useEffect(() => {
+    if (!runId || isActive(status)) return;
+    void stop();
+  }, [runId, status, stop]);
 
   const cancelRun = async () => {
     if (!runId || !isActive(status) || isCanceling) return;
     setIsCanceling(true);
     try {
-      const res = await fetch(`/api/runs/${runId}/cancel`, { method: "POST" });
-      if (!res.ok) {
+      const response = await fetch(`/api/runs/${runId}/cancel`, { method: "POST" });
+      if (!response.ok) {
         setError("Unable to cancel run");
         setIsCanceling(false);
+        return;
       }
+      await stop();
     } catch {
       setError("Unable to cancel run");
       setIsCanceling(false);
     }
   };
+
+  const handleSendAgentMessage = runId ? async (message: string) => {
+    try {
+      setError(null);
+      setStatus("queued");
+      await sendMessage({ text: message });
+    } catch (sendError) {
+      setError(sendError instanceof Error ? sendError.message : "Unable to send message");
+    }
+  } : undefined;
 
   return (
     <div
@@ -618,9 +582,9 @@ export default function SessionsPage() {
             isHydratingRun={isHydratingRouteRun}
             status={status}
             error={error}
-            isBusy={isBusy}
+            isBusy={isBusy || chatStatus === "submitted" || chatStatus === "streaming"}
             isCanceling={isCanceling}
-            messages={messages}
+            messages={transcriptMessages}
             tasks={tasks}
             requiresDdlUpload={requiresDdlUpload}
             resumeFromStage={resumeFromStage}
@@ -631,29 +595,7 @@ export default function SessionsPage() {
             onRetryRun={retryRun}
             onPickDdlFile={() => ddlFileInputRef.current?.click()}
             onCancelRun={cancelRun}
-            onSendAgentMessage={runId ? async (message: string) => {
-              try {
-                const response = await fetch(`/api/runs/${runId}/chat`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ message }),
-                });
-
-                if (!response.ok) {
-                  const payload = await response.json().catch(() => ({}));
-                  setError(typeof payload?.detail === "string" ? payload.detail : "Unable to send message");
-                  return;
-                }
-
-                setMessages((prev) => [...prev, makeMessage("user", message, "user_input")]);
-                setError(null);
-                setStatus("queued");
-                setIsAgentThinking(true);
-                await reconcileRunSnapshot(runId);
-              } catch {
-                setError("Unable to send message");
-              }
-            } : undefined}
+            onSendAgentMessage={handleSendAgentMessage}
           />
         </div>
       </SidebarProvider>

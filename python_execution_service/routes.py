@@ -38,6 +38,24 @@ from python_execution_service.models import (
 from python_execution_service.workflow import execute_run_sync
 
 
+_TRANSIENT_STREAM_PART_TYPES = {
+    "data-run-sync",
+    "data-run-status",
+    "data-step-status",
+    "data-terminal-progress",
+}
+
+
+def _normalize_stream_part(part: dict[str, Any]) -> dict[str, Any]:
+    normalized = {key: value for key, value in part.items() if key != "ts"}
+    part_type = normalized.get("type")
+    if part_type in _TRANSIENT_STREAM_PART_TYPES:
+        normalized["transient"] = True
+    if part_type in {"tool-input-start", "tool-input-available"}:
+        normalized["dynamic"] = True
+    return normalized
+
+
 # ── Internal helpers ────────────────────────────────────────────
 
 def _start_run_record(
@@ -343,6 +361,7 @@ def register_routes(app) -> None:
                             "missingObjects": list(run.missingObjects),
                             "executionErrors": list(run.executionErrors),
                         },
+                        transient=True,
                     ) if not sent_sync else None
                     parts = run.streamParts[idx:]
                     status = run.status
@@ -352,7 +371,7 @@ def register_routes(app) -> None:
                     yield format_sse_data(sync_part)
                 for part in parts:
                     yield f"id: {idx}\n".encode("utf-8")
-                    yield format_sse_data(part)
+                    yield format_sse_data(_normalize_stream_part(part))
                     idx += 1
                 now = time.time()
                 if now - heartbeat_at >= 20:
