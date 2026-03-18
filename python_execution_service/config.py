@@ -31,11 +31,5 @@ STEP_LABELS: dict[str, str] = {
     "finalize": "Finalize output",
 }
 
-THINKING_STEP_IDS: set[str] = {"self_heal", "convert_code", "validate"}
-
-# ── Agent configuration ─────────────────────────────────────────
-
-AGENT_MODEL = os.getenv("SNOWFLAKE_CORTEX_AGENT_MODEL", "claude-4-sonnet")
-
 # Per-run user message queues (thread-safe via RUN_LOCK)
 USER_MESSAGE_QUEUES: dict[str, list[str]] = {}

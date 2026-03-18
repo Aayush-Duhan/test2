@@ -6,7 +6,6 @@ from datetime import datetime
 
 from agentic_core.models.context import MigrationContext, MigrationState
 from agentic_core.nodes.common import is_error_state
-from agentic_core.services.report_context import build_report_context_memory
 from agentic_core.services.scai_runner import run_scai_command
 from agentic_core.services.ewi_cleanup import clean_ewi_from_file, clean_ewi_markers
 from agentic_core.utils.activity_log import log_event
@@ -72,10 +71,7 @@ def convert_code_node(state: MigrationContext) -> MigrationContext:
             # Also clean in-memory code if loaded from fallback
             state.converted_code = clean_ewi_markers(state.converted_code)
 
-        report_context = build_report_context_memory(state)
-        state.report_context = report_context
-        state.ignored_report_codes = report_context.get("ignored_codes", [])
-        state.report_scan_summary = report_context.get("report_scan_summary", {})
+
     except Exception as exc:
         error_msg = f"Exception during code conversion: {exc}"
         logger.error(error_msg)

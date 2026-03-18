@@ -126,64 +126,6 @@ def _build_request_body(
 
 
 # ---------------------------------------------------------------------------
-# Public API — Non-streaming
-# ---------------------------------------------------------------------------
-
-def call_cortex_complete(
-    session: Any,
-    messages: list[dict[str, str]],
-    *,
-    tools: list[dict] | None = None,
-    tool_choice: str | dict = "auto",
-    model: str | None = None,
-    temperature: float = 0,
-    max_tokens: int = 4096,
-    top_p: float | None = None,
-) -> dict:
-    """Call the Cortex REST API and return the full response.
-
-    Returns the parsed response dict with structure:
-        {
-            "content": str | None,         # text content (if any)
-            "tool_calls": list[dict] | None, # tool calls (if any)
-            "usage": dict | None,           # token usage
-            "finish_reason": str,           # "stop", "tool_calls", etc.
-            "raw": dict,                    # full raw API response
-        }
-    """
-    model_name = model or get_agent_model_name()
-    url, headers = _get_rest_url_and_headers(session)
-    rest = _get_http_session(session)
-
-    body = _build_request_body(
-        messages,
-        model=model_name,
-        tools=tools,
-        tool_choice=tool_choice,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        top_p=top_p,
-        stream=False,
-    )
-
-    with rest.use_requests_session(url) as http_session:
-        resp = http_session.post(url, json=body, headers=headers, timeout=120)
-        resp.raise_for_status()
-        data = resp.json()
-
-    choice = data.get("choices", [{}])[0]
-    message = choice.get("message", {})
-
-    return {
-        "content": message.get("content"),
-        "tool_calls": message.get("tool_calls"),
-        "usage": data.get("usage"),
-        "finish_reason": choice.get("finish_reason", "stop"),
-        "raw": data,
-    }
-
-
-# ---------------------------------------------------------------------------
 # Public API — Streaming
 # ---------------------------------------------------------------------------
 

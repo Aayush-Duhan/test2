@@ -45,6 +45,7 @@ from python_execution_service.data_stream import (
 )
 from python_execution_service.models import RunRecord, RunStep, StartRunRequest
 
+
 logger = logging.getLogger(__name__)
 
 _PERSIST_INTERVAL = 2.0
@@ -257,47 +258,26 @@ def append_terminal_output(
     append_stream_part(run, create_data_part("terminal-progress", payload, transient=True))
 
 
-def send_terminal_data(run: RunRecord, raw_chunk: str) -> None:
-    cleaned = raw_chunk.replace("\x00", "")
-    if not cleaned:
-        return
 
 
-def append_text_message(
-    run: RunRecord,
-    *,
-    role: str,
-    kind: str,
-    content: str,
-) -> dict[str, Any] | None:
-    cleaned = content if kind == "tool_result" else _sanitize_content(content)
-    if not cleaned.strip():
-        return None
-    message_id = generate_message_id()
-    append_snapshot_message(
-        run,
-        role=role,
-        kind=kind,
-        content=cleaned,
-        message_id=message_id,
-    )
-    text_id = generate_text_id()
-    append_stream_part(run, create_start_part(message_id))
-    append_stream_part(run, create_text_start_part(text_id))
-    append_stream_part(run, create_text_delta_part(text_id, cleaned))
-    append_stream_part(run, create_text_end_part(text_id))
-    append_stream_part(run, create_finish_part({"role": role, "kind": kind}))
-    return {"messageId": message_id, "textId": text_id}
 
 
 def append_reasoning_message(run: RunRecord, content: str) -> None:
     cleaned = _sanitize_content(content)
     if not cleaned.strip():
         return
+    snapshot = append_snapshot_message(
+        run,
+        role="agent",
+        kind="agent_thinking",
+        content=cleaned,
+    )
     reasoning_id = generate_reasoning_id()
+    append_stream_part(run, create_start_part(snapshot["id"]))
     append_stream_part(run, create_reasoning_start_part(reasoning_id))
     append_stream_part(run, create_reasoning_delta_part(reasoning_id, cleaned))
     append_stream_part(run, create_reasoning_end_part(reasoning_id))
+    append_stream_part(run, create_finish_part({"role": "agent", "kind": "agent_thinking"}))
 
 
 def append_tool_call_part(
@@ -308,13 +288,25 @@ def append_tool_call_part(
     output: dict[str, Any] | str,
     tool_call_id: str | None = None,
 ) -> str:
+    if isinstance(output, str):
+        snapshot_content = output
+    else:
+        snapshot_content = json.dumps(output, ensure_ascii=False, default=str)
+    snapshot = append_snapshot_message(
+        run,
+        role="agent",
+        kind="tool_result",
+        content=snapshot_content,
+    )
     resolved_tool_call_id = tool_call_id or generate_tool_call_id()
     input_text = json.dumps(tool_input, ensure_ascii=False, default=str)
+    append_stream_part(run, create_start_part(snapshot["id"]))
     append_stream_part(run, create_tool_input_start_part(resolved_tool_call_id, tool_name, dynamic=True))
     if input_text:
         append_stream_part(run, create_tool_input_delta_part(resolved_tool_call_id, input_text))
     append_stream_part(run, create_tool_input_available_part(resolved_tool_call_id, tool_name, tool_input, dynamic=True))
     append_stream_part(run, create_tool_output_available_part(resolved_tool_call_id, output))
+    append_stream_part(run, create_finish_part({"role": "agent", "kind": "tool_result"}))
     return resolved_tool_call_id
 
 
@@ -343,14 +335,13 @@ def append_chat_message(
         cleaned = content.strip()
         if not cleaned:
             return None
-        snapshot = append_snapshot_message(run, role=role, kind=kind, content=cleaned, ts=timestamp)
         try:
             parsed = json.loads(cleaned)
         except Exception:
             parsed = cleaned
         tool_name = parsed.get("tool", "tool") if isinstance(parsed, dict) else "tool"
         append_tool_call_part(run, tool_name=tool_name, tool_input={}, output=parsed)
-        return snapshot
+        return None
 
     cleaned = _sanitize_content(content)
     if not cleaned:
@@ -453,31 +444,33 @@ def append_run_status_part(run: RunRecord, status: str, error: str | None = None
 
 
 def append_sql_statement_part(run: RunRecord, payload: dict[str, Any]) -> None:
+    statement_index = payload.get("statementIndex")
+    label = f"Stmt {int(statement_index) + 1}" if isinstance(statement_index, int) else "Stmt ?"
+    snapshot = append_snapshot_message(
+        run,
+        role="agent",
+        kind="sql_statement",
+        content=label,
+    )
+    append_stream_part(run, create_start_part(snapshot["id"]))
     append_stream_part(run, create_data_part("sql-statement", payload))
+    append_stream_part(run, create_finish_part({"role": "agent", "kind": "sql_statement"}))
 
 
 def append_sql_error_part(run: RunRecord, payload: dict[str, Any]) -> None:
-    append_stream_part(run, create_data_part("sql-error", payload))
-
-
-def append_run_sync_part(run: RunRecord) -> None:
-    append_stream_part(
+    statement_index = payload.get("failedStatementIndex")
+    label = f"Stmt {int(statement_index) + 1} • ERROR" if isinstance(statement_index, int) else "Stmt ? • ERROR"
+    snapshot = append_snapshot_message(
         run,
-        create_data_part(
-            "run-sync",
-            {
-                "runId": run.runId,
-                "status": run.status,
-                "steps": [asdict(step) for step in run.steps],
-                "requiresDdlUpload": run.requiresDdlUpload,
-                "resumeFromStage": run.resumeFromStage,
-                "lastExecutedFileIndex": run.lastExecutedFileIndex,
-                "missingObjects": list(run.missingObjects),
-                "executionErrors": list(run.executionErrors),
-            },
-            transient=True,
-        ),
+        role="error",
+        kind="sql_error",
+        content=label,
     )
+    append_stream_part(run, create_start_part(snapshot["id"]))
+    append_stream_part(run, create_data_part("sql-error", payload))
+    append_stream_part(run, create_finish_part({"role": "error", "kind": "sql_error"}))
+
+
 
 
 def add_log(

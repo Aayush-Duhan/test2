@@ -91,15 +91,6 @@ def create_finish_part(message_metadata: dict[str, Any] | None = None) -> dict[s
         return {"type": "finish", "messageMetadata": message_metadata}
     return {"type": "finish"}
 
-
-def create_abort_part(reason: str) -> dict[str, Any]:
-    return {"type": "abort", "reason": reason}
-
-
-def create_error_part(error_text: str) -> dict[str, Any]:
-    return {"type": "error", "errorText": error_text}
-
-
 def create_data_part(
     data_type: str,
     data: dict[str, Any],

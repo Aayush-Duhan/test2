@@ -27,7 +27,7 @@ import {
   convertUiMessagesToChatMessages,
   getLatestUserMessageText,
   getUiMessageText,
-  hydrateUiMessagesFromSnapshotMessages,
+  replayStreamPartsToUiMessages,
 } from "@/lib/run-chat";
 import { getWizardState } from "@/lib/wizard-store";
 import { StreamingMessageParser } from "@/lib/runtime/message-parser";
@@ -224,7 +224,7 @@ export default function SessionsPage() {
     const streamParts = Array.isArray(data.streamParts) ? data.streamParts : [];
 
     streamCursorRef.current = streamParts.length;
-    setInitialChatMessages(hydrateUiMessagesFromSnapshotMessages(data.messages ?? []));
+    setInitialChatMessages(replayStreamPartsToUiMessages(data.streamParts ?? [], data.messages ?? []));
     setRunId(targetRunId);
     setSelectedSessionId(targetRunId);
     setPromptMode("chat");
@@ -281,7 +281,7 @@ export default function SessionsPage() {
     const data = await response.json();
     setSourceId(data.sourceId);
     setIsBusy(false);
-    return data.schemaId as string;
+    return data.sourceId as string;
   };
 
   const uploadSchema = async (pid: string, file: File) => {
@@ -298,7 +298,7 @@ export default function SessionsPage() {
     const data = await response.json();
     setSchemaId(data.schemaId);
     setIsBusy(false);
-    return data.sourceId as string;
+    return data.schemaId as string;
   };
 
   const resetRunState = React.useCallback(() => {

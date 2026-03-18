@@ -1,12 +1,9 @@
 """Pydantic request/response models and internal dataclasses."""
 
-import uuid
 from dataclasses import dataclass, field
-from typing import Any, TypedDict
+from typing import Any
 
 from pydantic import BaseModel
-
-from agentic_core.models.context import MigrationContext
 
 
 # ── Pydantic request / response models ──────────────────────────
@@ -89,9 +86,3 @@ class ResumeRunConfig:
     missing_objects: list[str] = field(default_factory=list)
     resume_from_stage: str = "execute_sql"
     last_executed_file_index: int = -1
-
-
-# ── LangGraph typed-dict state ──────────────────────────────────
-
-class WorkflowState(TypedDict):
-    context: MigrationContext

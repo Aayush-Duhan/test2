@@ -345,8 +345,8 @@ function ChatMessageArea({
           </div>
         ) : (
           <div ref={messageRef} className="space-y-3">
-            {messages.map((message, index) => (
-              <ChatBubble key={`msg-${message.id}-${index}`} message={message} />
+            {messages.map((message) => (
+              <MemoizedChatBubble key={message.id} message={message} />
             ))}
 
             {isAgentThinking && (
@@ -495,6 +495,20 @@ function ChatBubble({ message }: { message: ChatMessage }) {
     </div>
   );
 }
+
+const MemoizedChatBubble = React.memo(
+  ChatBubble,
+  (previous, next) => (
+    previous.message.id === next.message.id &&
+    previous.message.role === next.message.role &&
+    previous.message.kind === next.message.kind &&
+    previous.message.content === next.message.content &&
+    previous.message.sql?.statement === next.message.sql?.statement &&
+    previous.message.sql?.failedStatement === next.message.sql?.failedStatement &&
+    previous.message.sql?.output === next.message.sql?.output &&
+    previous.message.sql?.error === next.message.sql?.error
+  ),
+);
 
 function parseToolResultPayload(content: string): Record<string, unknown> | null {
   try {

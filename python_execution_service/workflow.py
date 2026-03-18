@@ -1,14 +1,13 @@
 """LangGraph agent-driven workflow execution."""
 
-import json
 import logging
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
-from agentic_core.agent.graph import build_agent_graph, cleanup_agent_session
-from agentic_core.agent.tools import get_active_context, set_active_context
+from agentic_core.agent.graph import run_agent_loop
+from agentic_core.agent.tools import get_active_context
 from agentic_core.models.context import MigrationContext, MigrationState
 from python_execution_service.config import (
     PROJECT_LOCKS,
@@ -30,7 +29,6 @@ from python_execution_service.helpers import (
     format_activity_log_entry,
     persist_runs_locked,
     pop_user_message,
-    send_terminal_data,
     set_run_status,
     update_step,
 )
@@ -66,7 +64,7 @@ def execute_run_sync(run_id: str, *, is_follow_up_chat: bool = False) -> None:  
         resume_last_executed_file_index = int(run.lastExecutedFileIndex)
     _perf_log(run, f"RUN_START   run_id={run_id}")
 
-    agent_graph = None
+
 
     try:
         set_run_status(run, "running")
@@ -88,8 +86,7 @@ def execute_run_sync(run_id: str, *, is_follow_up_chat: bool = False) -> None:  
             step_id = stage if isinstance(stage, str) and stage in STEP_LABELS else None
             append_terminal_output(run, text, is_progress=is_progress, step_id=step_id)
 
-        def raw_terminal_output_sink(raw_chunk: str) -> None:
-            send_terminal_data(run, raw_chunk)
+
 
         def sync_execution_state(updated: MigrationContext) -> None:
             previous_error_count = len(run.executionErrors)
@@ -113,14 +110,7 @@ def execute_run_sync(run_id: str, *, is_follow_up_chat: bool = False) -> None:  
             """Called from inside execute_sql_statements for EACH completed statement."""
             nonlocal _streamed_stmt_count
             stmt_index = entry.get("statement_index")
-            label = f"Stmt {int(stmt_index) + 1}" if isinstance(stmt_index, int) else "Stmt ?"
             output_preview = entry.get("output_preview", [])
-            output_text = ""
-            if isinstance(output_preview, list) and output_preview:
-                try:
-                    output_text = json.dumps(output_preview, ensure_ascii=False, default=str, indent=2)
-                except Exception:
-                    output_text = str(output_preview)
 
             statement_payload = {
                 "runId": run_id,
@@ -133,17 +123,6 @@ def execute_run_sync(run_id: str, *, is_follow_up_chat: bool = False) -> None:  
                 "outputPreview": output_preview,
             }
             append_sql_statement_part(run, statement_payload)
-            append_chat_message(
-                run,
-                role="agent",
-                kind="sql_statement",
-                content=label,
-                step={"id": "execute_sql", "label": STEP_LABELS["execute_sql"]},
-                sql={
-                    "statement": str(entry.get("statement") or ""),
-                    "output": output_text,
-                },
-            )
             with _streamed_stmt_lock:
                 _streamed_stmt_count += 1
 
@@ -193,7 +172,7 @@ def execute_run_sync(run_id: str, *, is_follow_up_chat: bool = False) -> None:  
         context.activity_log_sink = activity_log_sink
         context.execution_event_sink = realtime_execution_event_sink
         context.terminal_output_sink = terminal_output_sink
-        context.raw_terminal_output_sink = raw_terminal_output_sink
+
         context.sf_account = run.sfAccount or ""
         context.sf_user = run.sfUser or ""
         context.sf_role = run.sfRole or ""
@@ -263,10 +242,10 @@ def execute_run_sync(run_id: str, *, is_follow_up_chat: bool = False) -> None:  
                 run.conversationHistory = history
                 persist_runs_locked()
 
-        # ── Build and run the agent graph ──────────────────────
+        # ── Run the agent loop ─────────────────────────────────
 
-        _perf_log(run, "AGENT_BUILD_START")
-        agent_graph = build_agent_graph(
+        _perf_log(run, "AGENT_RUN_START")
+        run_agent_loop(
             context,
             message_callback=message_callback,
             step_callback=step_callback,
@@ -276,12 +255,6 @@ def execute_run_sync(run_id: str, *, is_follow_up_chat: bool = False) -> None:  
             consume_user_messages_from_start=is_follow_up_chat,
             start_with_migration_prompt=not is_follow_up_chat,
         )
-        _perf_log(run, "AGENT_BUILD_END")
-
-        _perf_log(run, "AGENT_RUN_START")
-        # The agent_graph is a dict with _run_fn — call it directly
-        run_fn = agent_graph["_run_fn"]
-        run_fn()
         _perf_log(run, "AGENT_RUN_END")
 
         # ── Process final state ────────────────────────────────
@@ -319,9 +292,6 @@ def execute_run_sync(run_id: str, *, is_follow_up_chat: bool = False) -> None:  
         set_run_status(run, status, message)
         append_run_status_part(run, status, message)
     finally:
-        # Clean up agent session
-        if agent_graph is not None:
-            cleanup_agent_session(agent_graph)
 
         total_elapsed = time.monotonic() - run_t0
         _perf_log(run, f"RUN_END     run_id={run_id}  total_elapsed={total_elapsed:.3f}s  status={run.status}")

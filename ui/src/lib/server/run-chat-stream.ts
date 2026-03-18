@@ -177,7 +177,7 @@ export async function createRunChatStreamResponse({
           }));
         }
 
-        return normalizedPart.type === "finish";
+        return false;
       };
 
       try {

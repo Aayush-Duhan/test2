@@ -5,15 +5,6 @@ from typing import Any, TypedDict
 from agentic_core.models.context import MigrationContext
 
 
-class ConversationMessage(TypedDict, total=False):
-    """A single message in the agent's conversation history."""
-    role: str          # "system" | "user" | "agent" | "tool"
-    content: str       # message text
-    tool_name: str     # only for role="tool"
-    tool_call_id: str  # links tool result to the tool call
-    name: str          # function name for tool calls
-
-
 class AgentState(TypedDict, total=False):
     """LangGraph state for the autonomous agent."""
 
