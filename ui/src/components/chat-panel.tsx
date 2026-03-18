@@ -189,10 +189,7 @@ export function ChatPanel({
     };
   }, [projectId, runId, status, syncProjectFiles]);
 
-  const chatMessages = React.useMemo(
-    () => messages.filter((message) => message.kind !== "step_started" && message.kind !== "step_completed" && message.kind !== "terminal_progress"),
-    [messages],
-  );
+  const chatMessages = React.useMemo(() => messages, [messages]);
 
   return (
     <div className="flex min-h-0 flex-1 overflow-hidden">
@@ -385,7 +382,7 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === "user";
   const isError = message.role === "error";
   const isAgentResponse = message.kind === "agent_response";
-  const isAgentThinking = message.kind === "agent_thinking" || message.kind === "thinking";
+  const isAgentThinking = message.kind === "agent_thinking";
   const isSqlRow = message.kind === "sql_statement" || message.kind === "sql_error";
   const isToolResult = message.kind === "tool_result";
 

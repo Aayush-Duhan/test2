@@ -30,14 +30,12 @@ class PythonExecutionServiceHelpersTests(unittest.TestCase):
             outputDir=output_dir,
         )
 
-    @patch("python_execution_service.helpers.sqlite_store.append_run_event")
     @patch("python_execution_service.helpers.sqlite_store.append_run_log")
     @patch("python_execution_service.helpers.persist_runs_locked")
-    def test_add_log_emits_terminal_event_not_chat_message(
+    def test_add_log_emits_terminal_progress_part(
         self,
         persist_runs_locked_mock,
         append_run_log_mock,
-        append_run_event_mock,
     ):
         with tempfile.TemporaryDirectory() as tmp_dir:
             run = self._make_run(tmp_dir)
@@ -46,31 +44,27 @@ class PythonExecutionServiceHelpersTests(unittest.TestCase):
 
             self.assertEqual(run.logs, ["Converting source"])
             self.assertEqual(run.messages, [])
-            self.assertEqual(len(run.events), 1)
-            self.assertEqual(run.events[0]["type"], "terminal:output")
-            self.assertEqual(run.events[0]["payload"]["text"], "Converting source")
-            self.assertFalse(run.events[0]["payload"]["isProgress"])
+            self.assertEqual(len(run.streamParts), 1)
+            self.assertEqual(run.streamParts[0]["type"], "data-terminal-progress")
+            self.assertEqual(run.streamParts[0]["data"]["text"], "Converting source")
+            self.assertFalse(run.streamParts[0]["data"]["isProgress"])
             append_run_log_mock.assert_called_once()
-            append_run_event_mock.assert_called_once()
             persist_runs_locked_mock.assert_called()
 
-    @patch("python_execution_service.helpers.sqlite_store.append_run_event")
     @patch("python_execution_service.helpers.persist_runs_locked")
-    def test_add_log_progress_emits_progress_terminal_event(
+    def test_add_log_progress_emits_progress_terminal_part(
         self,
         persist_runs_locked_mock,
-        append_run_event_mock,
     ):
         with tempfile.TemporaryDirectory() as tmp_dir:
             run = self._make_run(tmp_dir)
 
             add_log(run, "42% complete", is_progress=True)
 
-            self.assertEqual(run.logs, [])
+            self.assertEqual(run.logs, ["42% complete"])
             self.assertEqual(run.messages, [])
-            self.assertEqual(len(run.events), 1)
-            self.assertEqual(run.events[0]["type"], "terminal:output")
-            self.assertEqual(run.events[0]["payload"]["text"], "42% complete")
-            self.assertTrue(run.events[0]["payload"]["isProgress"])
-            append_run_event_mock.assert_called_once()
+            self.assertEqual(len(run.streamParts), 1)
+            self.assertEqual(run.streamParts[0]["type"], "data-terminal-progress")
+            self.assertEqual(run.streamParts[0]["data"]["text"], "42% complete")
+            self.assertTrue(run.streamParts[0]["data"]["isProgress"])
             persist_runs_locked_mock.assert_called()

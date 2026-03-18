@@ -1,4 +1,4 @@
-import { getPythonRunEvents } from "@/lib/python-execution-client";
+import { getPythonRunStream } from "@/lib/python-execution-client";
 import { withErrorHandling } from "@/lib/api-utils";
 
 export const runtime = "nodejs";
@@ -10,7 +10,7 @@ export async function GET(
   return withErrorHandling(async () => {
     const { id } = await params;
     const lastEventId = request.headers.get("last-event-id");
-    const response = await getPythonRunEvents(id, lastEventId);
+    const response = await getPythonRunStream(id, lastEventId);
 
     if (!response.ok || !response.body) {
       const payload = await response.json().catch(() => ({}));
@@ -22,9 +22,11 @@ export async function GET(
 
     return new Response(response.body, {
       headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache, no-transform",
-        Connection: "keep-alive",
+        "Content-Type": response.headers.get("Content-Type") ?? "text/event-stream",
+        "Cache-Control": response.headers.get("Cache-Control") ?? "no-cache, no-transform",
+        Connection: response.headers.get("Connection") ?? "keep-alive",
+        "x-vercel-ai-ui-message-stream": response.headers.get("x-vercel-ai-ui-message-stream") ?? "v1",
+        "x-vercel-ai-protocol": response.headers.get("x-vercel-ai-protocol") ?? "data",
       },
     });
   }, "Unable to open stream");

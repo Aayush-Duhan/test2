@@ -18,6 +18,7 @@ from python_execution_service.config import (
     RUN_LOCK,
     RUNS,
 )
+from python_execution_service.data_stream import create_data_part, format_sse_data, format_sse_done, patch_response_headers
 from python_execution_service.helpers import (
     _request_from_run,
     _sanitize_upload_filename,
@@ -303,7 +304,7 @@ def register_routes(app) -> None:
         )
         return _start_run_record(req, resume_config=resume_config)
 
-    @app.get("/v1/runs/{run_id}/events")
+    @app.get("/v1/runs/{run_id}/stream")
     async def stream_events(
         run_id: str,
         x_execution_token: str | None = Header(default=None),
@@ -318,6 +319,7 @@ def register_routes(app) -> None:
 
         async def iterator():
             idx = 0
+            sent_sync = False
             if last_event_id is not None:
                 try:
                     idx = max(0, int(last_event_id) + 1)
@@ -329,25 +331,39 @@ def register_routes(app) -> None:
                     run = RUNS.get(run_id)
                     if not run:
                         break
-                    events = run.events[idx:]
+                    sync_part = create_data_part(
+                        "run-sync",
+                        {
+                            "runId": run.runId,
+                            "status": run.status,
+                            "steps": [asdict(step) for step in run.steps],
+                            "requiresDdlUpload": run.requiresDdlUpload,
+                            "resumeFromStage": run.resumeFromStage,
+                            "lastExecutedFileIndex": run.lastExecutedFileIndex,
+                            "missingObjects": list(run.missingObjects),
+                            "executionErrors": list(run.executionErrors),
+                        },
+                    ) if not sent_sync else None
+                    parts = run.streamParts[idx:]
                     status = run.status
-                    total_events = len(run.events)
-                for event in events:
-                    event_id = idx
-                    yield f"event: {event['type']}\n".encode("utf-8")
-                    yield f"id: {event_id}\n".encode("utf-8")
-                    payload = event.get("payload", {})
-                    yield f"data: {json.dumps(payload)}\n\n".encode("utf-8")
+                    total_parts = len(run.streamParts)
+                if sync_part is not None:
+                    sent_sync = True
+                    yield format_sse_data(sync_part)
+                for part in parts:
+                    yield f"id: {idx}\n".encode("utf-8")
+                    yield format_sse_data(part)
                     idx += 1
                 now = time.time()
                 if now - heartbeat_at >= 20:
                     heartbeat_at = now
                     yield b": heartbeat\n\n"
-                if status in ("completed", "failed", "canceled") and idx >= total_events:
+                if status in ("completed", "failed", "canceled") and idx >= total_parts:
+                    yield format_sse_done()
                     break
                 await asyncio.sleep(0.25)
 
-        return StreamingResponse(iterator(), media_type="text/event-stream")
+        return patch_response_headers(StreamingResponse(iterator(), media_type="text/event-stream"))
 
     # ── Terminal WebSocket (bolt.new pattern) ────────────────────
     @app.websocket("/ws/terminal/agent")

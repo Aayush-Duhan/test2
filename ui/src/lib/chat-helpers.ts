@@ -21,7 +21,7 @@ export const isActive = (s: string) =>
 export function makeMessage(
   role: ChatMessageRole,
   content: string,
-  kind: ChatMessageKind = "log",
+  kind: ChatMessageKind = "agent_response",
   sql?: ChatSqlDetails,
   step?: { id: string; label: string },
 ): ChatMessage {
@@ -41,7 +41,7 @@ export function makeMessage(
  * to surface LLM reasoning during self-heal and other analysis steps.
  */
 export function makeThinkingMessage(content: string): ChatMessage {
-  return makeMessage("agent", content, "thinking");
+  return makeMessage("agent", content, "agent_thinking");
 }
 
 /* ── Step / Task merging ─────────────────────────────────── */

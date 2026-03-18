@@ -74,11 +74,10 @@ class RunRecord:
     lastExecutedFileIndex: int = -1
     selfHealIteration: int = 0
     error: str | None = None
-    events: list[dict[str, Any]] = field(default_factory=list)
+    streamParts: list[dict[str, Any]] = field(default_factory=list)
     messages: list[dict[str, Any]] = field(default_factory=list)
     outputDir: str = ""
     ddlUploadPath: str = ""
-    executionEventCursor: int = 0
     userMessageQueue: list[str] = field(default_factory=list)
     conversationHistory: list[dict[str, Any]] = field(default_factory=list)
 

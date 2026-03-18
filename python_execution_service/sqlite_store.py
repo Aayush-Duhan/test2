@@ -51,6 +51,10 @@ def init_schema() -> None:
             conn.execute(
                 "ALTER TABLE runs ADD COLUMN missing_objects_json TEXT NOT NULL DEFAULT '[]'"
             )
+        if "stream_parts_json" not in columns:
+            conn.execute(
+                "ALTER TABLE runs ADD COLUMN stream_parts_json TEXT NOT NULL DEFAULT '[]'"
+            )
         conn.execute(
             """
             INSERT OR REPLACE INTO schema_migrations(version, applied_at)
@@ -81,9 +85,9 @@ def save_run_snapshot(run: dict[str, Any]) -> None:
                 updated_at, error, sf_account, sf_user, sf_role, sf_warehouse,
                 sf_database, sf_schema, sf_authenticator, requires_ddl_upload,
                 resume_from_stage, last_executed_file_index, self_heal_iteration,
-                missing_objects_json, output_dir, ddl_upload_path
+                missing_objects_json, stream_parts_json, output_dir, ddl_upload_path
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(run_id) DO UPDATE SET
                 project_id = excluded.project_id,
                 project_name = excluded.project_name,
@@ -108,6 +112,7 @@ def save_run_snapshot(run: dict[str, Any]) -> None:
                 last_executed_file_index = excluded.last_executed_file_index,
                 self_heal_iteration = excluded.self_heal_iteration,
                 missing_objects_json = excluded.missing_objects_json,
+                stream_parts_json = excluded.stream_parts_json,
                 output_dir = excluded.output_dir,
                 ddl_upload_path = excluded.ddl_upload_path
             """,
@@ -136,6 +141,7 @@ def save_run_snapshot(run: dict[str, Any]) -> None:
                 int(run.get("lastExecutedFileIndex", -1)),
                 int(run.get("selfHealIteration", 0)),
                 _json_dump(run.get("missingObjects", [])),
+                _json_dump(run.get("streamParts", [])),
                 run.get("outputDir", ""),
                 run.get("ddlUploadPath", ""),
             ),
@@ -188,18 +194,6 @@ def append_run_log(run_id: str, message: str, created_at: str) -> None:
             (run_id, message, created_at),
         )
 
-
-def append_run_event(run_id: str, event_type: str, payload: dict[str, Any], timestamp: str) -> None:
-    with connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO run_events(run_id, event_type, payload_json, timestamp)
-            VALUES (?, ?, ?, ?)
-            """,
-            (run_id, event_type, _json_dump(payload), timestamp),
-        )
-
-
 def append_run_message(run_id: str, message: dict[str, Any]) -> None:
     with connect() as conn:
         conn.execute(
@@ -232,6 +226,7 @@ def list_runs() -> list[dict[str, Any]]:
               sf_account, sf_user, sf_role, sf_warehouse, sf_database, sf_schema,
               sf_authenticator, requires_ddl_upload, resume_from_stage,
               last_executed_file_index, self_heal_iteration, missing_objects_json,
+              stream_parts_json,
               output_dir, ddl_upload_path
             FROM runs
             """
@@ -253,15 +248,6 @@ def list_runs() -> list[dict[str, Any]]:
                 """
                 SELECT message
                 FROM run_logs
-                WHERE run_id = ?
-                ORDER BY id
-                """,
-                (run_id,),
-            ).fetchall()
-            events = conn.execute(
-                """
-                SELECT event_type, payload_json, timestamp
-                FROM run_events
                 WHERE run_id = ?
                 ORDER BY id
                 """,
@@ -330,8 +316,9 @@ def list_runs() -> list[dict[str, Any]]:
                     "lastExecutedFileIndex": int(row[21] if row[21] is not None else -1),
                     "selfHealIteration": int(row[22] if row[22] is not None else 0),
                     "missingObjects": _json_load(row[23] or "[]", []),
-                    "outputDir": row[24] or "",
-                    "ddlUploadPath": row[25] or "",
+                    "streamParts": _json_load(row[24] or "[]", []),
+                    "outputDir": row[25] or "",
+                    "ddlUploadPath": row[26] or "",
                     "steps": [
                         {
                             "id": step[0],
@@ -343,14 +330,6 @@ def list_runs() -> list[dict[str, Any]]:
                         for step in steps
                     ],
                     "logs": [log[0] for log in logs],
-                    "events": [
-                        {
-                            "type": event[0],
-                            "payload": _json_load(event[1], {}),
-                            "timestamp": event[2],
-                        }
-                        for event in events
-                    ],
                     "messages": [
                         {
                             "id": message[0],

@@ -1,8 +1,7 @@
 import type { StepState } from "@/lib/migration-types";
 
-/* ── Session & Run ───────────────────────────────────────── */
-
 export type ExecuteStatementEvent = {
+  runId?: string;
   file?: string;
   fileIndex?: number;
   statementIndex?: number;
@@ -13,6 +12,7 @@ export type ExecuteStatementEvent = {
 };
 
 export type ExecuteErrorEvent = {
+  runId?: string;
   file?: string;
   fileIndex?: number;
   errorType?: string;
@@ -32,23 +32,14 @@ export type SessionSummary = {
   executionErrors?: ExecuteErrorEvent[];
 };
 
-
-/* ── Chat messages ───────────────────────────────────────── */
-
-export type ChatMessageRole = "system" | "agent" | "error" | "user";
+export type ChatMessageRole = "agent" | "error" | "user";
 export type ChatMessageKind =
-  | "step_started"
-  | "step_completed"
-  | "log"
-  | "thinking"
-  | "terminal_progress"
+  | "agent_response"
+  | "agent_thinking"
+  | "tool_result"
   | "sql_statement"
   | "sql_error"
-  | "run_status"
-  | "agent_response"
-  | "user_input"
-  | "agent_thinking"
-  | "tool_result";
+  | "user_input";
 
 export type ChatSqlDetails = {
   statement?: string;
@@ -67,7 +58,63 @@ export type ChatMessage = {
   sql?: ChatSqlDetails;
 };
 
-/* ── Step blueprint ──────────────────────────────────────── */
+export type RunSyncDataPart = {
+  runId: string;
+  status: string;
+  steps: StepState[];
+  requiresDdlUpload: boolean;
+  resumeFromStage: string;
+  lastExecutedFileIndex: number;
+  missingObjects: string[];
+  executionErrors: ExecuteErrorEvent[];
+};
+
+export type RunStatusDataPart = {
+  runId: string;
+  status: string;
+  error?: string | null;
+  requiresDdlUpload?: boolean;
+  resumeFromStage?: string;
+  lastExecutedFileIndex?: number;
+  missingObjects?: string[];
+};
+
+export type StepStatusDataPart = {
+  runId: string;
+  stepId: string;
+  label: string;
+  status: string;
+};
+
+export type TerminalProgressDataPart = {
+  runId: string;
+  text: string;
+  isProgress: boolean;
+  stepId?: string;
+  stepLabel?: string;
+};
+
+export type RunStreamPart =
+  | { type: "start"; messageId: string }
+  | { type: "text-start"; id: string }
+  | { type: "text-delta"; id: string; delta: string }
+  | { type: "text-end"; id: string }
+  | { type: "reasoning-start"; id: string }
+  | { type: "reasoning-delta"; id: string; delta: string }
+  | { type: "reasoning-end"; id: string }
+  | { type: "tool-input-start"; toolCallId: string; toolName: string }
+  | { type: "tool-input-delta"; toolCallId: string; inputTextDelta: string }
+  | { type: "tool-input-available"; toolCallId: string; toolName: string; input: Record<string, unknown> }
+  | { type: "tool-output-available"; toolCallId: string; output: unknown }
+  | { type: "finish"; messageMetadata?: Record<string, unknown> }
+  | { type: "error"; errorText: string }
+  | { type: "abort"; reason: string }
+  | { type: "data-run-sync"; data: RunSyncDataPart }
+  | { type: "data-run-status"; data: RunStatusDataPart }
+  | { type: "data-step-status"; data: StepStatusDataPart }
+  | { type: "data-sql-statement"; data: ExecuteStatementEvent }
+  | { type: "data-sql-error"; data: ExecuteErrorEvent }
+  | { type: "data-terminal-progress"; data: TerminalProgressDataPart };
 
 export const STEP_BLUEPRINT: StepState[] = [
   { id: "init_project", label: "Initialize project", status: "pending" },

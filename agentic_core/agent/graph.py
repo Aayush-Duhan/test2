@@ -205,7 +205,7 @@ def execute_tool(tool_name: str, session_id: str, extra_args: dict | None = None
 def run_agent_loop(
     context: MigrationContext,
     *,
-    message_callback: Optional[Callable[[str, str, str], None]] = None,
+    message_callback: Optional[Callable[[dict[str, Any]], None]] = None,
     step_callback: Optional[Callable[[str, str], None]] = None,
     user_message_getter: Optional[Callable[[], Optional[str]]] = None,
     conversation_history: Optional[list[dict[str, str]]] = None,
@@ -247,7 +247,7 @@ def run_agent_loop(
     def emit(role: str, kind: str, content: str) -> None:
         if message_callback and content.strip():
             try:
-                message_callback(role, kind, content)
+                message_callback({"type": "message", "role": role, "kind": kind, "content": content})
             except Exception:
                 pass
 
@@ -402,7 +402,17 @@ def run_agent_loop(
 
                 # ── Execute tool ───────────────────────────────
                 logger.info("Agent calling tool: %s", tool_name)
-                emit("system", "step_started", f"Executing: {tool_name}")
+                if message_callback:
+                    try:
+                        message_callback({
+                            "type": "tool-call",
+                            "toolCallId": tc_id,
+                            "toolName": tool_name,
+                            "input": extra_args,
+                            "output": "",
+                        })
+                    except Exception:
+                        pass
                 log_tool_start(session_id, tool_name)
 
                 tool_result = execute_tool(
@@ -427,6 +437,21 @@ def run_agent_loop(
                 if tool_name in TOOL_RESULT_DISPLAY:
                     tool_payload = _format_tool_result_for_chat(tool_name, tool_result)
                     emit("agent", "tool_result", tool_payload)
+                elif message_callback:
+                    try:
+                        parsed_output = json.loads(tool_result)
+                    except Exception:
+                        parsed_output = tool_result
+                    try:
+                        message_callback({
+                            "type": "tool-call",
+                            "toolCallId": tc_id,
+                            "toolName": tool_name,
+                            "input": extra_args,
+                            "output": parsed_output,
+                        })
+                    except Exception:
+                        pass
 
                 # Add tool result as role: "tool" message (API format)
                 conversation.append({
@@ -453,7 +478,7 @@ def run_agent_loop(
 def build_agent_graph(
     context: MigrationContext,
     *,
-    message_callback: Optional[Callable[[str, str, str], None]] = None,
+    message_callback: Optional[Callable[[dict[str, Any]], None]] = None,
     step_callback: Optional[Callable[[str, str], None]] = None,
     user_message_getter: Optional[Callable[[], Optional[str]]] = None,
     conversation_history: Optional[list[dict[str, str]]] = None,

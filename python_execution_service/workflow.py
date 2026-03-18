@@ -19,8 +19,12 @@ from python_execution_service.config import (
 from python_execution_service.helpers import (
     add_log,
     append_chat_message,
-    append_event,
+    append_run_status_part,
+    append_sql_error_part,
+    append_sql_statement_part,
+    append_step_status_part,
     append_terminal_output,
+    append_tool_call_part,
     ensure_not_canceled,
     flush_persist_if_dirty,
     format_activity_log_entry,
@@ -67,13 +71,7 @@ def execute_run_sync(run_id: str, *, is_follow_up_chat: bool = False) -> None:  
     try:
         set_run_status(run, "running")
         if not is_follow_up_chat:
-            append_event(run, "run:started", {"runId": run_id})
-            append_chat_message(
-                run,
-                role="system",
-                kind="run_status",
-                content="Migration started. The agent is analyzing the task...",
-            )
+            append_run_status_part(run, "running")
 
         # ── Sink callbacks (identical to the old workflow) ──────
 
@@ -94,6 +92,7 @@ def execute_run_sync(run_id: str, *, is_follow_up_chat: bool = False) -> None:  
             send_terminal_data(run, raw_chunk)
 
         def sync_execution_state(updated: MigrationContext) -> None:
+            previous_error_count = len(run.executionErrors)
             with RUN_LOCK:
                 run.executionLog = updated.execution_log or []
                 run.executionErrors = updated.execution_errors or []
@@ -103,6 +102,9 @@ def execute_run_sync(run_id: str, *, is_follow_up_chat: bool = False) -> None:  
                 run.lastExecutedFileIndex = int(updated.last_executed_file_index)
                 run.ddlUploadPath = updated.ddl_upload_path or ""
                 persist_runs_locked()
+            for error_entry in run.executionErrors[previous_error_count:]:
+                if isinstance(error_entry, dict):
+                    append_sql_error_part(run, {"runId": run_id, **error_entry})
 
         _streamed_stmt_lock = threading.Lock()
         _streamed_stmt_count = 0
@@ -120,20 +122,17 @@ def execute_run_sync(run_id: str, *, is_follow_up_chat: bool = False) -> None:  
                 except Exception:
                     output_text = str(output_preview)
 
-            append_event(
-                run,
-                "execute_sql:statement",
-                {
-                    "runId": run_id,
-                    "file": entry.get("file"),
-                    "fileIndex": entry.get("fileIndex"),
-                    "statementIndex": stmt_index,
-                    "statement": entry.get("statement"),
-                    "status": entry.get("status"),
-                    "rowCount": entry.get("row_count", 0),
-                    "outputPreview": output_preview,
-                },
-            )
+            statement_payload = {
+                "runId": run_id,
+                "file": entry.get("file"),
+                "fileIndex": entry.get("fileIndex"),
+                "statementIndex": stmt_index,
+                "statement": entry.get("statement"),
+                "status": entry.get("status"),
+                "rowCount": entry.get("row_count", 0),
+                "outputPreview": output_preview,
+            }
+            append_sql_statement_part(run, statement_payload)
             append_chat_message(
                 run,
                 role="agent",
@@ -217,26 +216,36 @@ def execute_run_sync(run_id: str, *, is_follow_up_chat: bool = False) -> None:  
 
         # ── Agent callbacks ────────────────────────────────────
 
-        def message_callback(role: str, kind: str, content: str) -> None:
+        def message_callback(event: dict[str, Any]) -> None:
             """Stream agent messages to the frontend in real time."""
-            append_chat_message(run, role=role, kind=kind, content=content)
+            event_type = str(event.get("type", "message"))
+            if event_type == "message":
+                append_chat_message(
+                    run,
+                    role=str(event.get("role", "agent")),
+                    kind=str(event.get("kind", "agent_response")),
+                    content=str(event.get("content", "")),
+                )
+                return
+
+            if event_type == "tool-call":
+                if event.get("output", "") == "":
+                    return
+                append_tool_call_part(
+                    run,
+                    tool_name=str(event.get("toolName", "tool")),
+                    tool_input=event.get("input", {}) if isinstance(event.get("input"), dict) else {},
+                    output=event.get("output", ""),
+                    tool_call_id=str(event.get("toolCallId")) if event.get("toolCallId") else None,
+                )
+                return
 
         def step_callback(step_id: str, status: str) -> None:
             """Update step progress in the UI."""
             ensure_not_canceled(run_id)
             update_step(run, step_id, status)
-            if status == "running":
-                append_event(
-                    run,
-                    "step:started",
-                    {"runId": run_id, "stepId": step_id, "label": STEP_LABELS.get(step_id, step_id)},
-                )
-            elif status in ("completed", "failed"):
-                append_event(
-                    run,
-                    "step:completed" if status == "completed" else "step:failed",
-                    {"runId": run_id, "stepId": step_id, "label": STEP_LABELS.get(step_id, step_id)},
-                )
+            append_step_status_part(run, step_id, status)
+            if status in ("completed", "failed"):
                 # After execute_sql, sync execution state
                 try:
                     updated_ctx = get_active_context(run_id)
@@ -284,44 +293,31 @@ def execute_run_sync(run_id: str, *, is_follow_up_chat: bool = False) -> None:  
 
         if final_context.current_stage == MigrationState.COMPLETED:
             set_run_status(run, "completed")
-            append_event(run, "run:completed", {"runId": run_id})
-            if not is_follow_up_chat:
-                append_chat_message(
-                    run,
-                    role="system",
-                    kind="run_status",
-                    content="Migration completed successfully!",
-                )
+            append_run_status_part(run, "completed")
             return
 
         if final_context.requires_ddl_upload:
             reason = final_context.human_intervention_reason or "DDL upload required"
             set_run_status(run, "failed", reason)
-            append_event(run, "run:failed", {"runId": run_id, "reason": reason})
             with RUN_LOCK:
                 run.requiresDdlUpload = True
                 run.missingObjects = final_context.missing_objects or []
                 run.resumeFromStage = final_context.resume_from_stage or "execute_sql"
                 run.lastExecutedFileIndex = int(final_context.last_executed_file_index)
                 persist_runs_locked(force=True)
+            append_run_status_part(run, "failed", reason)
             return
 
         reason = final_context.human_intervention_reason or "Migration stopped before completion"
         set_run_status(run, "failed", reason)
-        append_event(run, "run:failed", {"runId": run_id, "reason": reason})
+        append_run_status_part(run, "failed", reason)
 
     except Exception as exc:
         message = str(exc)
         canceled = message == "Run canceled"
         status = "canceled" if canceled else "failed"
         set_run_status(run, status, message)
-        append_event(run, "run:failed", {"runId": run_id, "reason": message})
-        append_chat_message(
-            run,
-            role="error",
-            kind="run_status",
-            content=message or "Run failed",
-        )
+        append_run_status_part(run, status, message)
     finally:
         # Clean up agent session
         if agent_graph is not None:

@@ -1,5 +1,7 @@
 """Utility / helper functions: serialization, logging, auth, run-record management."""
 
+from __future__ import annotations
+
 import json
 import logging
 import re
@@ -20,8 +22,26 @@ from python_execution_service.config import (
     RUN_LOCK,
     RUNS,
     STEP_LABELS,
-    THINKING_STEP_IDS,
     USER_MESSAGE_QUEUES,
+)
+from python_execution_service.data_stream import (
+    create_data_part,
+    create_finish_part,
+    create_reasoning_delta_part,
+    create_reasoning_end_part,
+    create_reasoning_start_part,
+    create_start_part,
+    create_text_delta_part,
+    create_text_end_part,
+    create_text_start_part,
+    create_tool_input_available_part,
+    create_tool_input_delta_part,
+    create_tool_input_start_part,
+    create_tool_output_available_part,
+    generate_message_id,
+    generate_reasoning_id,
+    generate_text_id,
+    generate_tool_call_id,
 )
 from python_execution_service.models import RunRecord, RunStep, StartRunRequest
 
@@ -32,13 +52,9 @@ _last_persist_time: float = 0.0
 _persist_dirty: bool = False
 
 
-# ── Time helpers ────────────────────────────────────────────────
-
 def now_iso() -> str:
     return datetime.utcnow().isoformat()
 
-
-# ── Serialization / deserialization ─────────────────────────────
 
 def _serialize_run_record(run: RunRecord) -> dict[str, Any]:
     return asdict(run)
@@ -76,27 +92,16 @@ def _deserialize_run_record(payload: dict[str, Any]) -> RunRecord:
         lastExecutedFileIndex=int(payload.get("lastExecutedFileIndex", -1)),
         selfHealIteration=int(payload.get("selfHealIteration", 0)),
         error=payload.get("error"),
+        streamParts=payload.get("streamParts", []),
+        messages=payload.get("messages", []),
         outputDir=payload.get("outputDir", ""),
         ddlUploadPath=payload.get("ddlUploadPath", ""),
-        executionEventCursor=int(payload.get("executionEventCursor", 0)),
-        events=payload.get("events", []),
-        messages=payload.get("messages", []),
         userMessageQueue=payload.get("userMessageQueue", []),
         conversationHistory=payload.get("conversationHistory", []),
     )
 
 
-# ── Persistence ─────────────────────────────────────────────────
-
 def persist_runs_locked(*, force: bool = False) -> None:
-    """Must be called while holding RUN_LOCK.
-
-    When *force* is False (the default for high-frequency callers), the actual
-    sqlite write is throttled to at most once per ``_PERSIST_INTERVAL`` seconds.
-    The in-memory state is always authoritative; the SSE stream reads from
-    ``run.events`` directly, so throttling persistence does not delay events
-    reaching the frontend.
-    """
     global _last_persist_time, _persist_dirty
     now = time.monotonic()
     _persist_dirty = True
@@ -112,7 +117,6 @@ def persist_runs_locked(*, force: bool = False) -> None:
 
 
 def flush_persist_if_dirty() -> None:
-    """Force a persist if any writes were deferred by throttling."""
     global _persist_dirty
     with RUN_LOCK:
         if _persist_dirty:
@@ -145,60 +149,61 @@ def load_persisted_runs() -> None:
             persist_runs_locked(force=True)
 
 
-# ── Auth ────────────────────────────────────────────────────────
-
 def require_auth(x_execution_token: str | None) -> None:
     if x_execution_token != EXECUTION_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-# ── Event / message / log helpers ───────────────────────────────
+def _append_stream_part_file(run: RunRecord, part: dict[str, Any]) -> None:
+    stream_file = Path(run.outputDir) / "stream_parts.jsonl"
+    stream_file.parent.mkdir(parents=True, exist_ok=True)
+    with stream_file.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(part, ensure_ascii=False) + "\n")
 
-def append_event(run: RunRecord, event_type: str, payload: dict[str, Any]) -> None:
-    event = {"type": event_type, "payload": payload, "timestamp": now_iso()}
+
+def append_stream_part(run: RunRecord, part: dict[str, Any]) -> None:
+    timestamp = now_iso()
+    payload = {**part, "ts": timestamp}
     with RUN_LOCK:
-        run.events.append(event)
-        run.updatedAt = event["timestamp"]
+        run.streamParts.append(payload)
+        run.updatedAt = timestamp
+        persist_runs_locked()
+    _append_stream_part_file(run, payload)
+
+
+def append_snapshot_message(
+    run: RunRecord,
+    *,
+    role: str,
+    kind: str,
+    content: str,
+    step: dict[str, str] | None = None,
+    sql: dict[str, str] | None = None,
+    ts: str | None = None,
+    message_id: str | None = None,
+) -> dict[str, Any]:
+    timestamp = ts or now_iso()
+    message: dict[str, Any] = {
+        "id": message_id or str(uuid.uuid4()),
+        "ts": timestamp,
+        "role": role,
+        "kind": kind,
+        "content": content,
+    }
+    if step:
+        message["step"] = step
+    if sql:
+        message["sql"] = sql
+
+    with RUN_LOCK:
+        run.messages.append(message)
+        run.updatedAt = timestamp
         persist_runs_locked()
     try:
-        sqlite_store.append_run_event(run.runId, event_type, payload, event["timestamp"])
+        sqlite_store.append_run_message(run.runId, message)
     except Exception as exc:
-        logger.warning("Failed to append event for run %s: %s", run.runId, exc)
-    events_file = Path(run.outputDir) / "events.jsonl"
-    events_file.parent.mkdir(parents=True, exist_ok=True)
-    with events_file.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event) + "\n")
-
-
-def append_terminal_output(
-    run: RunRecord,
-    text: str,
-    *,
-    is_progress: bool = False,
-    step_id: str | None = None,
-) -> None:
-    payload: dict[str, Any] = {
-        "text": str(text),
-        "isProgress": is_progress,
-    }
-    if step_id in STEP_LABELS:
-        payload["stepId"] = step_id
-        payload["stepLabel"] = STEP_LABELS[step_id]
-    append_event(run, "terminal:output", payload)
-
-
-def send_terminal_data(run: RunRecord, raw_chunk: str) -> None:
-    """Emit a raw PTY chunk to the frontend terminal.
-
-    Unlike ``append_terminal_output`` which sends parsed/cleaned lines,
-    this streams the *exact* bytes from the PTY (including ANSI codes and
-    control characters) so xterm can render them natively — identical to
-    bolt.new's WebSocket ``terminal.write(event.data)`` pattern.
-    """
-    cleaned = raw_chunk.replace("\x00", "")
-    if not cleaned:
-        return
-    append_event(run, "terminal:data", {"data": cleaned})
+        logger.warning("Failed to append message for run %s: %s", run.runId, exc)
+    return message
 
 
 def _strip_log_tags(message: str) -> str:
@@ -210,7 +215,7 @@ def _clean_terminal_output(message: str) -> str:
     lines: list[str] = []
     for raw_line in ansi_stripped.splitlines():
         line = raw_line
-        line = re.sub(r"[¿´³]", " ", line)
+        line = re.sub(r"[Â¿Â´Â³]", " ", line)
         line = re.sub(r"[\u2500-\u257f\u2580-\u259f]", " ", line)
         line = re.sub(r"[\u00c0-\u00ff]", " ", line)
         line = re.sub(r"[=]{3,}", " ", line)
@@ -231,6 +236,88 @@ def _sanitize_content(message: str, *, strip_prefix: bool = True) -> str:
     return _clean_terminal_output(text)
 
 
+def append_terminal_output(
+    run: RunRecord,
+    text: str,
+    *,
+    is_progress: bool = False,
+    step_id: str | None = None,
+) -> None:
+    cleaned = _sanitize_content(str(text), strip_prefix=False).strip()
+    if not cleaned:
+        return
+    payload: dict[str, Any] = {
+        "runId": run.runId,
+        "text": cleaned,
+        "isProgress": is_progress,
+    }
+    if step_id in STEP_LABELS:
+        payload["stepId"] = step_id
+        payload["stepLabel"] = STEP_LABELS[step_id]
+    append_stream_part(run, create_data_part("terminal-progress", payload))
+
+
+def send_terminal_data(run: RunRecord, raw_chunk: str) -> None:
+    cleaned = raw_chunk.replace("\x00", "")
+    if not cleaned:
+        return
+
+
+def append_text_message(
+    run: RunRecord,
+    *,
+    role: str,
+    kind: str,
+    content: str,
+) -> dict[str, Any] | None:
+    cleaned = content if kind == "tool_result" else _sanitize_content(content)
+    if not cleaned.strip():
+        return None
+    message_id = generate_message_id()
+    append_snapshot_message(
+        run,
+        role=role,
+        kind=kind,
+        content=cleaned,
+        message_id=message_id,
+    )
+    text_id = generate_text_id()
+    append_stream_part(run, create_start_part(message_id))
+    append_stream_part(run, create_text_start_part(text_id))
+    append_stream_part(run, create_text_delta_part(text_id, cleaned))
+    append_stream_part(run, create_text_end_part(text_id))
+    append_stream_part(run, create_finish_part({"role": role, "kind": kind}))
+    return {"messageId": message_id, "textId": text_id}
+
+
+def append_reasoning_message(run: RunRecord, content: str) -> None:
+    cleaned = _sanitize_content(content)
+    if not cleaned.strip():
+        return
+    reasoning_id = generate_reasoning_id()
+    append_stream_part(run, create_reasoning_start_part(reasoning_id))
+    append_stream_part(run, create_reasoning_delta_part(reasoning_id, cleaned))
+    append_stream_part(run, create_reasoning_end_part(reasoning_id))
+
+
+def append_tool_call_part(
+    run: RunRecord,
+    *,
+    tool_name: str,
+    tool_input: dict[str, Any],
+    output: dict[str, Any] | str,
+    tool_call_id: str | None = None,
+) -> str:
+    resolved_tool_call_id = tool_call_id or generate_tool_call_id()
+    input_text = json.dumps(tool_input, ensure_ascii=False, default=str)
+    append_stream_part(run, create_tool_input_start_part(resolved_tool_call_id, tool_name))
+    if input_text:
+        append_stream_part(run, create_tool_input_delta_part(resolved_tool_call_id, input_text))
+    append_stream_part(run, create_tool_input_available_part(resolved_tool_call_id, tool_name, tool_input))
+    append_stream_part(run, create_tool_output_available_part(resolved_tool_call_id, output))
+    return resolved_tool_call_id
+
+
 def append_chat_message(
     run: RunRecord,
     *,
@@ -240,39 +327,42 @@ def append_chat_message(
     step: dict[str, str] | None = None,
     sql: dict[str, str] | None = None,
     ts: str | None = None,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     timestamp = ts or now_iso()
-    cleaned_content = content if kind == "tool_result" else _sanitize_content(content)
-    message: dict[str, Any] = {
-        "id": str(uuid.uuid4()),
-        "ts": timestamp,
-        "role": role,
-        "kind": kind,
-        "content": cleaned_content,
-    }
+    if role == "user":
+        cleaned = _sanitize_content(content)
+        if not cleaned:
+            return None
+        return append_snapshot_message(run, role=role, kind=kind, content=cleaned, step=step, sql=sql, ts=timestamp)
 
-    if step:
-        message["step"] = step
+    if kind == "thinking":
+        append_reasoning_message(run, content)
+        return None
 
-    if sql:
-        cleaned_sql = {
-            key: _sanitize_content(value, strip_prefix=False)
-            for key, value in sql.items()
-            if isinstance(value, str) and _sanitize_content(value, strip_prefix=False)
-        }
-        if cleaned_sql:
-            message["sql"] = cleaned_sql
+    if kind == "tool_result":
+        cleaned = content.strip()
+        if not cleaned:
+            return None
+        snapshot = append_snapshot_message(run, role=role, kind=kind, content=cleaned, ts=timestamp)
+        try:
+            parsed = json.loads(cleaned)
+        except Exception:
+            parsed = cleaned
+        tool_name = parsed.get("tool", "tool") if isinstance(parsed, dict) else "tool"
+        append_tool_call_part(run, tool_name=tool_name, tool_input={}, output=parsed)
+        return snapshot
 
-    with RUN_LOCK:
-        run.messages.append(message)
-        run.updatedAt = timestamp
-        persist_runs_locked()
-    try:
-        sqlite_store.append_run_message(run.runId, message)
-    except Exception as exc:
-        logger.warning("Failed to append message for run %s: %s", run.runId, exc)
-    append_event(run, "chat:message", message)
-    return message
+    cleaned = _sanitize_content(content)
+    if not cleaned:
+        return None
+    snapshot = append_snapshot_message(run, role=role, kind=kind, content=cleaned, step=step, sql=sql, ts=timestamp)
+    text_id = generate_text_id()
+    append_stream_part(run, create_start_part(snapshot["id"]))
+    append_stream_part(run, create_text_start_part(text_id))
+    append_stream_part(run, create_text_delta_part(text_id, cleaned))
+    append_stream_part(run, create_text_end_part(text_id))
+    append_stream_part(run, create_finish_part({"role": role, "kind": kind}))
+    return snapshot
 
 
 def format_activity_log_entry(entry: dict[str, Any]) -> str:
@@ -319,11 +409,72 @@ def update_step(run: RunRecord, step_id: str, status: str) -> None:
                 step.status = status
                 if status == "running":
                     step.startedAt = current_time
+                    step.endedAt = None
                 if status in ("completed", "failed"):
                     step.endedAt = current_time
                 run.updatedAt = current_time
                 persist_runs_locked(force=True)
                 return
+
+
+def append_step_status_part(run: RunRecord, step_id: str, status: str) -> None:
+    append_stream_part(
+        run,
+        create_data_part(
+            "step-status",
+            {
+                "runId": run.runId,
+                "stepId": step_id,
+                "label": STEP_LABELS.get(step_id, step_id),
+                "status": status,
+            },
+        ),
+    )
+
+
+def append_run_status_part(run: RunRecord, status: str, error: str | None = None) -> None:
+    append_stream_part(
+        run,
+        create_data_part(
+            "run-status",
+            {
+                "runId": run.runId,
+                "status": status,
+                "error": error,
+                "requiresDdlUpload": run.requiresDdlUpload,
+                "resumeFromStage": run.resumeFromStage,
+                "lastExecutedFileIndex": run.lastExecutedFileIndex,
+                "missingObjects": list(run.missingObjects),
+            },
+        ),
+    )
+
+
+def append_sql_statement_part(run: RunRecord, payload: dict[str, Any]) -> None:
+    append_stream_part(run, create_data_part("sql-statement", payload))
+
+
+def append_sql_error_part(run: RunRecord, payload: dict[str, Any]) -> None:
+    append_stream_part(run, create_data_part("sql-error", payload))
+
+
+def append_run_sync_part(run: RunRecord) -> None:
+    append_stream_part(
+        run,
+        create_data_part(
+            "run-sync",
+            {
+                "runId": run.runId,
+                "status": run.status,
+                "steps": [asdict(step) for step in run.steps],
+                "requiresDdlUpload": run.requiresDdlUpload,
+                "resumeFromStage": run.resumeFromStage,
+                "lastExecutedFileIndex": run.lastExecutedFileIndex,
+                "missingObjects": list(run.missingObjects),
+                "executionErrors": list(run.executionErrors),
+            },
+        ),
+    )
 
 
 def add_log(
@@ -336,12 +487,6 @@ def add_log(
     if not line:
         return
     created_at = now_iso()
-    resolved_step_id = step_id if step_id in STEP_LABELS else None
-
-    if is_progress:
-        append_terminal_output(run, line, is_progress=True, step_id=resolved_step_id)
-        return
-
     with RUN_LOCK:
         run.logs.append(line)
         run.updatedAt = created_at
@@ -350,12 +495,7 @@ def add_log(
         sqlite_store.append_run_log(run.runId, line, created_at)
     except Exception as exc:
         logger.warning("Failed to append log for run %s: %s", run.runId, exc)
-    append_chat_message(
-        run,
-        role="system",
-        kind="log",
-        content=line,
-    )
+    append_terminal_output(run, line, is_progress=is_progress, step_id=step_id)
 
 
 def set_run_status(run: RunRecord, status: str, error: str | None = None) -> None:
@@ -375,8 +515,6 @@ def ensure_not_canceled(run_id: str) -> None:
     if cancel_flag and cancel_flag.is_set():
         raise RuntimeError("Run canceled")
 
-
-# ── Run-record factory helpers ──────────────────────────────────
 
 def _sanitize_upload_filename(name: str) -> str:
     base = Path(name or "uploaded.ddl.sql").name
@@ -403,10 +541,7 @@ def _request_from_run(existing: RunRecord) -> StartRunRequest:
     )
 
 
-# ── User message queue helpers ──────────────────────────────────
-
 def push_user_message(run_id: str, message: str) -> None:
-    """Queue a user message for the running agent to pick up."""
     with RUN_LOCK:
         if run_id not in USER_MESSAGE_QUEUES:
             USER_MESSAGE_QUEUES[run_id] = []
@@ -418,7 +553,6 @@ def push_user_message(run_id: str, message: str) -> None:
 
 
 def pop_user_message(run_id: str) -> str | None:
-    """Pop the next user message from the queue for a run."""
     with RUN_LOCK:
         queue = USER_MESSAGE_QUEUES.get(run_id, [])
         if queue:

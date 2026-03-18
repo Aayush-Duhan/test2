@@ -99,14 +99,14 @@ export async function sendChatMessage(runId: string, message: string) {
   return request(`/v1/runs/${runId}/chat`, { method: "POST", body: { message } });
 }
 
-export async function getPythonRunEvents(runId: string, lastEventId?: string | null) {
+export async function getPythonRunStream(runId: string, lastEventId?: string | null) {
   const headers: Record<string, string> = {
     "X-Execution-Token": executionToken,
   };
   if (lastEventId && lastEventId.trim().length > 0) {
     headers["Last-Event-ID"] = lastEventId;
   }
-  return fetch(`${baseUrl}/v1/runs/${runId}/events`, {
+  return fetch(`${baseUrl}/v1/runs/${runId}/stream`, {
     headers,
     cache: "no-store",
   });
